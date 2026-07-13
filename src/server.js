@@ -79,10 +79,19 @@ server.registerTool(
         .number()
         .optional()
         .describe("Max milliseconds to block. Capped at 45000 regardless of what's passed. Defaults to 45000."),
+      tail_chars: z
+        .number()
+        .int()
+        .positive()
+        .optional()
+        .describe("When the wait times out and the task is still running, return this many trailing narration characters."),
     },
   },
-  async ({ task_id, timeout_ms }) => {
-    const s = await tasks.wait(task_id, timeout_ms != null ? { timeoutMs: timeout_ms } : undefined);
+  async ({ task_id, timeout_ms, tail_chars }) => {
+    const s = await tasks.wait(task_id, {
+      ...(timeout_ms != null ? { timeoutMs: timeout_ms } : {}),
+      ...(tail_chars != null ? { tailChars: tail_chars } : {}),
+    });
     return toon(s);
   }
 );

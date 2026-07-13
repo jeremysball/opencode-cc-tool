@@ -60,7 +60,7 @@ per-task log file. Returns a task summary immediately, including `id`,
   <id>`) instead of starting fresh. Get session ids from a prior
   `opencode_result` or `opencode_status` response.
 
-### `opencode_wait(task_id, timeout_ms?)`
+### `opencode_wait(task_id, timeout_ms?, tail_chars?)`
 
 Blocks until the task's real `exit` event fires, or `timeout_ms` elapses
 (capped at 45000 regardless of what's passed, to stay under Claude Code's
@@ -68,7 +68,10 @@ own 60s default MCP tool-call timeout), then returns the same status shape
 as `opencode_status`. This is the closest available analog to the built-in
 Agent tool's auto-resume behavior: call once, get blocked, get a result,
 instead of looping on `opencode_status` yourself. If it returns with
-`status: "running"`, the task simply outlived the cap; call it again.
+`status: "running"`, the task simply outlived the cap; call it again. Pass
+`tail_chars` to include the trailing parsed narration from a task that is
+still running after the timeout, plus its full character count and whether
+the tail was truncated.
 
 ### `opencode_cancel(task_id, grace_ms?)`
 

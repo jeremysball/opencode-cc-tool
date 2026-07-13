@@ -310,6 +310,24 @@ describe("wait()", () => {
 
     const settled = await mgr.wait(dispatched.id, { timeoutMs: 20 });
     assert.equal(settled.status, "running");
+    assert.equal("outputTail" in settled, false);
+  });
+
+  test("returns the requested narration tail when its timeout elapses", async () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const output = "first chunk\nsecond chunk";
+    fs.writeFileSync(
+      dispatched.logPath,
+      JSON.stringify({ type: "text", part: { messageID: "m1", text: output } })
+    );
+
+    const settled = await mgr.wait(dispatched.id, { timeoutMs: 20, tailChars: 6 });
+    assert.equal(settled.status, "running");
+    assert.equal(settled.outputTail, " chunk");
+    assert.equal(settled.outputTailTotalChars, output.length);
+    assert.equal(settled.outputTailTruncated, true);
   });
 });
 

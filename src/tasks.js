@@ -246,7 +246,7 @@ export function createTaskManager({
     return summarize(task);
   }
 
-  function wait(taskId, { timeoutMs = MAX_WAIT_MS } = {}) {
+  function wait(taskId, { timeoutMs = MAX_WAIT_MS, tailChars } = {}) {
     const task = tasks.get(taskId);
     if (!task) throw noSuchTask(taskId);
     const cappedMs = Math.min(timeoutMs, MAX_WAIT_MS);
@@ -254,16 +254,28 @@ export function createTaskManager({
       return Promise.resolve(summarize(task));
     }
     return new Promise((resolve) => {
-      const settle = () => {
+      const settle = (timedOut = false) => {
         const list = waiters.get(taskId);
         if (list) {
           const idx = list.indexOf(settle);
           if (idx !== -1) list.splice(idx, 1);
         }
         clearTimeout(timer);
-        resolve(summarize(tasks.get(taskId)));
+        const current = tasks.get(taskId);
+        const summary = summarize(current);
+        if (!timedOut || current.status !== "running" || tailChars == null) {
+          resolve(summary);
+          return;
+        }
+        const output = readNarration(current.logPath);
+        resolve({
+          ...summary,
+          outputTail: output.slice(-tailChars),
+          outputTailTotalChars: output.length,
+          outputTailTruncated: output.length > tailChars,
+        });
       };
-      const timer = setTimeout(settle, cappedMs);
+      const timer = setTimeout(() => settle(true), cappedMs);
       if (!waiters.has(taskId)) waiters.set(taskId, []);
       waiters.get(taskId).push(settle);
     });
@@ -304,6 +316,33 @@ export function createTaskManager({
       return null;
     }
     return null;
+  }
+
+  function readNarration(logPath) {
+    const textByMessageId = new Map();
+    const textOrder = [];
+    let raw = "";
+    try {
+      raw = fs.readFileSync(logPath, "utf8");
+    } catch {
+      return "";
+    }
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        const evt = JSON.parse(line);
+        if (evt.type !== "text" || !evt.part || typeof evt.part.text !== "string") continue;
+        const mid = evt.part.messageID;
+        if (!textByMessageId.has(mid)) {
+          textByMessageId.set(mid, []);
+          textOrder.push(mid);
+        }
+        textByMessageId.get(mid).push(evt.part.text);
+      } catch {
+        continue;
+      }
+    }
+    return textOrder.map((mid) => textByMessageId.get(mid).join("")).join("\n\n");
   }
 
   function result(taskId, { full = false } = {}) {
