@@ -22,6 +22,17 @@ fs.mkdirSync(LOG_DIR, { recursive: true });
 // than reported as a stale, possibly-wrong "running".
 const tasks = new Map();
 
+// Escalation timers for opencode_cancel, keyed by task id. Kept out of the
+// task object itself: task objects get JSON.stringify'd wholesale in
+// persist(), and a Timeout isn't serializable data.
+const escalationTimers = new Map();
+
+// Pending opencode_wait callbacks, keyed by task id. Lets a single MCP tool
+// call block until the child's exit event fires (or a timeout elapses)
+// instead of the caller round-tripping opencode_status in a loop. Not
+// persisted or shared across a server restart, same as the tasks map itself.
+const waiters = new Map();
+
 function loadPersisted() {
   try {
     const raw = fs.readFileSync(TASKS_FILE, "utf8");
@@ -42,8 +53,8 @@ function persist() {
 }
 
 function summarize(task) {
-  const { promptPreview, id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath } = task;
-  return { id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath, promptPreview };
+  const { promptPreview, id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested } = task;
+  return { id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath, promptPreview, cancelRequested: !!cancelRequested };
 }
 
 export function dispatch({ prompt, directory, model, variant, sessionId }) {
@@ -80,10 +91,20 @@ export function dispatch({ prompt, directory, model, variant, sessionId }) {
   // private log file it cannot introspect. It has no session/pane to list,
   // so it can't mistake the orchestration layer for a sibling task the way
   // a tmux-wrapped run could (the bug this tool exists to avoid).
+  //
+  // detached: true makes the child its own process group leader (pgid ===
+  // pid), not a fully-detached background daemon -- we still hold a direct
+  // reference and listen on its 'exit' event the same as before. The reason
+  // is opencode_cancel: opencode can itself spawn a subprocess (e.g. a bash
+  // command it's running). Signaling just task.pid stops opencode but can
+  // leave that subprocess orphaned and running. Signaling the negative pid
+  // targets the whole process group in one call. Without detached: true,
+  // the child would share this server's own process group, and a group
+  // kill would take the server down with it.
   const child = spawn("opencode", args, {
     cwd: directory,
     stdio: ["ignore", logFd, logFd],
-    detached: false,
+    detached: true,
   });
   fs.closeSync(logFd);
 
@@ -102,18 +123,25 @@ export function dispatch({ prompt, directory, model, variant, sessionId }) {
     logPath,
     promptPreview: prompt.length > 200 ? prompt.slice(0, 200) + "…" : prompt,
     spawnError: null,
+    cancelRequested: false,
   };
   tasks.set(id, task);
   persist();
 
   child.on("exit", (code, signal) => {
-    task.status = code === 0 && !signal ? "done" : "crashed";
+    const timer = escalationTimers.get(id);
+    if (timer) {
+      clearTimeout(timer);
+      escalationTimers.delete(id);
+    }
+    task.status = task.cancelRequested ? "cancelled" : code === 0 && !signal ? "done" : "crashed";
     task.exitCode = code;
     task.signal = signal;
     task.endedAt = new Date().toISOString();
     const parsedSessionId = readSessionIdFromLog(logPath);
     if (parsedSessionId) task.sessionId = parsedSessionId;
     persist();
+    settleWaiters(id);
   });
 
   child.on("error", (err) => {
@@ -121,6 +149,7 @@ export function dispatch({ prompt, directory, model, variant, sessionId }) {
     task.spawnError = String(err && err.message ? err.message : err);
     task.endedAt = new Date().toISOString();
     persist();
+    settleWaiters(id);
   });
 
   child.unref();
@@ -128,10 +157,92 @@ export function dispatch({ prompt, directory, model, variant, sessionId }) {
   return summarize(task);
 }
 
+export function cancel(taskId, { graceMs = 5000 } = {}) {
+  const task = tasks.get(taskId);
+  if (!task) throw new Error(`unknown task_id: ${taskId}`);
+  if (task.status !== "running") {
+    return { ...summarize(task), note: `task is already ${task.status}; nothing to cancel` };
+  }
+  if (task.pid == null) {
+    throw new Error(`task ${taskId} has no pid on record; cannot signal it`);
+  }
+
+  task.cancelRequested = true;
+  persist();
+  sendSignal(task.pid, "SIGTERM");
+
+  const timer = setTimeout(() => {
+    escalationTimers.delete(taskId);
+    if (tasks.get(taskId)?.status === "running") {
+      sendSignal(task.pid, "SIGKILL");
+    }
+  }, graceMs);
+  escalationTimers.set(taskId, timer);
+
+  return { ...summarize(task), note: `SIGTERM sent to process group ${task.pid}; escalates to SIGKILL after ${graceMs}ms if it hasn't exited` };
+}
+
+// Targets the process group (negative pid), which reaches opencode and any
+// subprocess it spawned (e.g. a bash command it's mid-way through running),
+// since dispatch() makes the child a process group leader for exactly this.
+// Falls back to the plain pid if group signaling isn't available (ESRCH on
+// -pid can mean the group is already gone even though a stray pid isn't,
+// though in practice these move together since detached: true makes them
+// the same process).
+function sendSignal(pid, signal) {
+  try {
+    process.kill(-pid, signal);
+    return;
+  } catch (err) {
+    if (err.code !== "ESRCH") throw err;
+  }
+  try {
+    process.kill(pid, signal);
+  } catch (err) {
+    if (err.code !== "ESRCH") throw err;
+  }
+}
+
 export function status(taskId) {
   const task = tasks.get(taskId);
   if (!task) throw new Error(`unknown task_id: ${taskId}`);
   return summarize(task);
+}
+
+// The MCP tool-call default timeout in Claude Code is 60s (MCP_TOOL_TIMEOUT).
+// Cap the internal wait below that so a long task returns a clean
+// "still running" instead of the whole tool call erroring out from the
+// client side with no result at all.
+const MAX_WAIT_MS = 45000;
+
+export function wait(taskId, { timeoutMs = MAX_WAIT_MS } = {}) {
+  const task = tasks.get(taskId);
+  if (!task) throw new Error(`unknown task_id: ${taskId}`);
+  const cappedMs = Math.min(timeoutMs, MAX_WAIT_MS);
+  if (task.status !== "running") {
+    return Promise.resolve(summarize(task));
+  }
+  return new Promise((resolve) => {
+    const settle = () => {
+      const list = waiters.get(taskId);
+      if (list) {
+        const idx = list.indexOf(settle);
+        if (idx !== -1) list.splice(idx, 1);
+      }
+      clearTimeout(timer);
+      resolve(summarize(tasks.get(taskId)));
+    };
+    const timer = setTimeout(settle, cappedMs);
+    if (!waiters.has(taskId)) waiters.set(taskId, []);
+    waiters.get(taskId).push(settle);
+  });
+}
+
+function settleWaiters(taskId) {
+  const list = waiters.get(taskId);
+  if (!list) return;
+  waiters.delete(taskId);
+  for (const settle of list.slice()) settle();
 }
 
 export function list() {

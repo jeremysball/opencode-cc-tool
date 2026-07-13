@@ -43,11 +43,51 @@ server.registerTool(
 );
 
 server.registerTool(
+  "opencode_cancel",
+  {
+    title: "Cancel a running opencode task",
+    description:
+      "Stop a running task: sends SIGTERM to the task's whole process group (opencode and any subprocess it spawned), escalating to SIGKILL after a grace period if it hasn't exited. A finished task's status is unaffected and returns a note instead of an error. Poll opencode_status afterward; the task moves to status 'cancelled' once its exit event lands.",
+    inputSchema: {
+      task_id: z.string().describe("Task id returned by opencode_dispatch."),
+      grace_ms: z
+        .number()
+        .optional()
+        .describe("Milliseconds to wait after SIGTERM before escalating to SIGKILL. Defaults to 5000."),
+    },
+  },
+  async ({ task_id, grace_ms }) => {
+    const c = tasks.cancel(task_id, grace_ms != null ? { graceMs: grace_ms } : undefined);
+    return { content: [{ type: "text", text: JSON.stringify(c, null, 2) }] };
+  }
+);
+
+server.registerTool(
+  "opencode_wait",
+  {
+    title: "Block until an opencode task finishes",
+    description:
+      "Block on a running task's real exit event (or a timeout, whichever comes first) and return its status once settled. The closest analog to the built-in Agent tool's auto-resume behavior available over plain MCP request/response, without a poll loop. Capped internally at 45s so the call returns cleanly instead of hitting Claude Code's own MCP tool-call timeout; if status is still 'running' when it returns, call opencode_wait again.",
+    inputSchema: {
+      task_id: z.string().describe("Task id returned by opencode_dispatch."),
+      timeout_ms: z
+        .number()
+        .optional()
+        .describe("Max milliseconds to block. Capped at 45000 regardless of what's passed. Defaults to 45000."),
+    },
+  },
+  async ({ task_id, timeout_ms }) => {
+    const s = await tasks.wait(task_id, timeout_ms != null ? { timeoutMs: timeout_ms } : undefined);
+    return { content: [{ type: "text", text: JSON.stringify(s, null, 2) }] };
+  }
+);
+
+server.registerTool(
   "opencode_status",
   {
     title: "Check opencode task status",
     description:
-      "Return structured status for a dispatched task: running | done | crashed | unknown, plus exit code and log path once finished. Backed by the child process's real exit event, not log string-matching.",
+      "Return structured status for a dispatched task: running | done | crashed | cancelled | unknown, plus exit code and log path once finished. Backed by the child process's real exit event, not log string-matching.",
     inputSchema: {
       task_id: z.string().describe("Task id returned by opencode_dispatch."),
     },
