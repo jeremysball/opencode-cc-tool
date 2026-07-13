@@ -19,7 +19,7 @@ server.registerTool(
   {
     title: "Dispatch opencode task",
     description:
-      "Start an `opencode run` in the background as a directly-spawned child process (no tmux, no shared visibility into the orchestration layer) and return a task_id immediately. Poll with opencode_status, then read opencode_result once done.",
+      "Queue an `opencode run` for background execution as a directly-spawned child process (no tmux, no shared visibility into the orchestration layer) and return a task_id immediately. The server starts at most two tasks in each rolling five-second window by default. Poll with opencode_status, then read opencode_result once done.",
     inputSchema: {
       prompt: z.string().describe("The message/prompt to send to opencode."),
       directory: z
@@ -50,9 +50,9 @@ server.registerTool(
 server.registerTool(
   "opencode_cancel",
   {
-    title: "Cancel a running opencode task",
+    title: "Cancel a queued or running opencode task",
     description:
-      "Stop a running task: sends SIGTERM to the task's whole process group (opencode and any subprocess it spawned), escalating to SIGKILL after a grace period if it hasn't exited. A finished task's status is unaffected and returns a note instead of an error. Poll opencode_status afterward; the task moves to status 'cancelled' once its exit event lands.",
+      "Cancel a queued task before it starts, or stop a running task by sending SIGTERM to its whole process group (opencode and any subprocess it spawned), escalating to SIGKILL after a grace period if it hasn't exited. A finished task's status is unaffected and returns a note instead of an error.",
     inputSchema: {
       task_id: z.string().describe("Task id returned by opencode_dispatch."),
       grace_ms: z
@@ -72,7 +72,7 @@ server.registerTool(
   {
     title: "Block until an opencode task finishes",
     description:
-      "Block on a running task's real exit event (or a timeout, whichever comes first) and return its status once settled. The closest analog to the built-in Agent tool's auto-resume behavior available over plain MCP request/response, without a poll loop. Capped internally at 45s so the call returns cleanly instead of hitting Claude Code's own MCP tool-call timeout; if status is still 'running' when it returns, call opencode_wait again.",
+      "Block on a queued or running task until it exits (or a timeout) and return its status once settled. The closest analog to the built-in Agent tool's auto-resume behavior available over plain MCP request/response, without a poll loop. Capped internally at 45s so the call returns cleanly instead of hitting Claude Code's own MCP tool-call timeout; if status is still queued or running when it returns, call opencode_wait again.",
     inputSchema: {
       task_id: z.string().describe("Task id returned by opencode_dispatch."),
       timeout_ms: z
@@ -101,7 +101,7 @@ server.registerTool(
   {
     title: "Check opencode task status",
     description:
-      "Return structured status for a dispatched task: running | done | crashed | cancelled | unknown, plus exit code and log path once finished. Backed by the child process's real exit event, not log string-matching.",
+      "Return structured status for a dispatched task: queued | running | done | crashed | cancelled | unknown, plus exit code and log path once finished. Backed by the child process's real exit event, not log string-matching.",
     inputSchema: {
       task_id: z.string().describe("Task id returned by opencode_dispatch."),
     },

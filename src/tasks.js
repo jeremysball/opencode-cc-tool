@@ -16,6 +16,19 @@ const MAX_WAIT_MS = 45000;
 
 const NARRATION_PREVIEW_CHARS = 2000;
 
+function positiveInteger(value, fallback) {
+  return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+}
+
+const DEFAULT_MAX_DISPATCHES_PER_WINDOW = positiveInteger(
+  Number(process.env.OPENCODE_CC_TOOL_MAX_DISPATCHES_PER_WINDOW),
+  2
+);
+const DEFAULT_DISPATCH_WINDOW_MS = positiveInteger(
+  Number(process.env.OPENCODE_CC_TOOL_DISPATCH_WINDOW_MS),
+  5000
+);
+
 // Factory rather than a module-level singleton, so tests can construct an
 // isolated instance with an injected spawnFn/killFn (no real `opencode`
 // process, no real OS signals) and its own state directory, instead of
@@ -25,12 +38,16 @@ export function createTaskManager({
   spawnFn = spawn,
   killFn = (pid, signal) => process.kill(pid, signal),
   stateDir = DEFAULT_STATE_DIR,
+  maxDispatchesPerWindow = DEFAULT_MAX_DISPATCHES_PER_WINDOW,
+  dispatchWindowMs = DEFAULT_DISPATCH_WINDOW_MS,
 } = {}) {
   const LOG_DIR = path.join(stateDir, "logs");
   const TASKS_FILE = path.join(stateDir, "tasks.json");
+  const dispatchLimit = positiveInteger(maxDispatchesPerWindow, DEFAULT_MAX_DISPATCHES_PER_WINDOW);
+  const dispatchWindow = positiveInteger(dispatchWindowMs, DEFAULT_DISPATCH_WINDOW_MS);
   fs.mkdirSync(LOG_DIR, { recursive: true });
 
-  // In-memory map is the source of truth for "running" while this server
+  // In-memory state is the source of truth for queued and running tasks while this server
   // process is alive: process exit is delivered via the 'exit' event on our
   // own child_process handle, which only exists in the process that spawned
   // it. tasks.json is a best-effort record for opencode_list/debugging across
@@ -51,12 +68,20 @@ export function createTaskManager({
   // persisted or shared across a server restart, same as the tasks map itself.
   const waiters = new Map();
 
+  // Queued launches retain full prompts only in memory. Persisted queued tasks
+  // become unknown on restart, just like running tasks, rather than launching
+  // a prompt the replacement server cannot safely reconstruct.
+  const pendingLaunches = new Map();
+  const launchQueue = [];
+  const launchTimes = [];
+  let launchTimer = null;
+
   function loadPersisted() {
     try {
       const raw = fs.readFileSync(TASKS_FILE, "utf8");
       const persisted = JSON.parse(raw);
       for (const t of persisted) {
-        if (t.status === "running") t.status = "unknown";
+        if (t.status === "running" || t.status === "queued") t.status = "unknown";
         tasks.set(t.id, t);
       }
     } catch (err) {
@@ -106,52 +131,18 @@ export function createTaskManager({
 
     const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
     const logPath = path.join(LOG_DIR, `${id}.ndjson`);
-    const logFd = fs.openSync(logPath, "a");
 
     const usingDefaultModel = !model;
     const resolvedModel = model || "openai/gpt-5.6-luna";
 
-    const args = ["run", "--dir", directory, "--auto", "--format", "json"];
-    args.push("-m", resolvedModel);
-    if (usingDefaultModel) {
-      args.push("--variant", "high");
-    } else if (variant) {
-      args.push("--variant", variant);
-    }
-    if (sessionId) {
-      args.push("--continue", "--session", sessionId);
-    }
-    args.push("--", prompt);
-
-    // No tmux: the child is spawned directly with its stdio redirected to a
-    // private log file it cannot introspect. It has no session/pane to list,
-    // so it can't mistake the orchestration layer for a sibling task the way
-    // a tmux-wrapped run could (the bug this tool exists to avoid).
-    //
-    // detached: true makes the child its own process group leader (pgid ===
-    // pid), not a fully-detached background daemon -- we still hold a direct
-    // reference and listen on its 'exit' event the same as before. The reason
-    // is opencode_cancel: opencode can itself spawn a subprocess (e.g. a bash
-    // command it's running). Signaling just task.pid stops opencode but can
-    // leave that subprocess orphaned and running. Signaling the negative pid
-    // targets the whole process group in one call. Without detached: true,
-    // the child would share this server's own process group, and a group
-    // kill would take the server down with it.
-    const child = spawnFn("opencode", args, {
-      cwd: directory,
-      stdio: ["ignore", logFd, logFd],
-      detached: true,
-    });
-    fs.closeSync(logFd);
-
     const task = {
       id,
-      status: "running",
+      status: "queued",
       directory,
       model: resolvedModel,
       variant: usingDefaultModel ? "high" : variant || null,
       sessionId: sessionId || null,
-      pid: child.pid,
+      pid: null,
       startedAt: new Date().toISOString(),
       endedAt: null,
       exitCode: null,
@@ -164,39 +155,115 @@ export function createTaskManager({
     };
     tasks.set(id, task);
     persist();
+    pendingLaunches.set(id, { prompt, directory, model: resolvedModel, variant: task.variant, sessionId });
+    launchQueue.push(id);
+    launchQueuedTasks();
 
-    child.on("exit", (code, signal) => {
-      const timer = escalationTimers.get(id);
-      if (timer) {
-        clearTimeout(timer);
-        escalationTimers.delete(id);
-      }
-      task.status = task.cancelRequested ? "cancelled" : code === 0 && !signal ? "done" : "crashed";
-      task.exitCode = code;
-      task.signal = signal;
-      task.endedAt = new Date().toISOString();
-      const parsedSessionId = readSessionIdFromLog(logPath);
-      if (parsedSessionId) task.sessionId = parsedSessionId;
+    const summary = summarize(task);
+    return {
+      ...summary,
+      next: task.status === "queued"
+        ? `Task is queued; run opencode_wait or opencode_status with task_id "${id}" to check when it starts`
+        : `Run opencode_wait or opencode_status with task_id "${id}" to check progress`,
+    };
+  }
+
+  function launchQueuedTasks() {
+    launchTimer = null;
+    const now = Date.now();
+    while (launchTimes.length && launchTimes[0] <= now - dispatchWindow) launchTimes.shift();
+
+    while (launchQueue.length && launchTimes.length < dispatchLimit) {
+      const id = launchQueue.shift();
+      const task = tasks.get(id);
+      if (!task || task.status !== "queued") continue;
+      launchTimes.push(Date.now());
+      startTask(task);
+    }
+
+    if (launchQueue.length && !launchTimer) {
+      const delay = Math.max(1, launchTimes[0] + dispatchWindow - Date.now());
+      launchTimer = setTimeout(launchQueuedTasks, delay);
+    }
+  }
+
+  function startTask(task) {
+    const launch = pendingLaunches.get(task.id);
+    pendingLaunches.delete(task.id);
+    if (!launch) return;
+
+    const args = ["run", "--dir", launch.directory, "--auto", "--format", "json", "-m", launch.model];
+    if (launch.variant) args.push("--variant", launch.variant);
+    if (launch.sessionId) args.push("--continue", "--session", launch.sessionId);
+    args.push("--", launch.prompt);
+
+    let logFd;
+    try {
+      logFd = fs.openSync(task.logPath, "a");
+      // No tmux: the child has no shared session to introspect. It is its own
+      // process group so cancellation can stop any subprocesses it creates.
+      const child = spawnFn("opencode", args, {
+        cwd: launch.directory,
+        stdio: ["ignore", logFd, logFd],
+        detached: true,
+      });
+      fs.closeSync(logFd);
+      task.status = "running";
+      task.pid = child.pid;
       persist();
-      settleWaiters(id);
-    });
 
-    child.on("error", (err) => {
+      child.on("exit", (code, signal) => {
+        const timer = escalationTimers.get(task.id);
+        if (timer) {
+          clearTimeout(timer);
+          escalationTimers.delete(task.id);
+        }
+        task.status = task.cancelRequested ? "cancelled" : code === 0 && !signal ? "done" : "crashed";
+        task.exitCode = code;
+        task.signal = signal;
+        task.endedAt = new Date().toISOString();
+        const parsedSessionId = readSessionIdFromLog(task.logPath);
+        if (parsedSessionId) task.sessionId = parsedSessionId;
+        persist();
+        settleWaiters(task.id);
+      });
+
+      child.on("error", (err) => {
+        task.status = "crashed";
+        task.spawnError = String(err && err.message ? err.message : err);
+        task.endedAt = new Date().toISOString();
+        persist();
+        settleWaiters(task.id);
+      });
+
+      child.unref();
+    } catch (err) {
+      if (logFd != null) fs.closeSync(logFd);
       task.status = "crashed";
       task.spawnError = String(err && err.message ? err.message : err);
       task.endedAt = new Date().toISOString();
       persist();
-      settleWaiters(id);
-    });
-
-    child.unref();
-
-    return { ...summarize(task), next: `Run opencode_wait or opencode_status with task_id "${id}" to check progress` };
+      settleWaiters(task.id);
+    }
   }
 
   function cancel(taskId, { graceMs = 5000 } = {}) {
     const task = tasks.get(taskId);
     if (!task) throw noSuchTask(taskId);
+    if (task.status === "queued") {
+      const index = launchQueue.indexOf(taskId);
+      if (index !== -1) launchQueue.splice(index, 1);
+      pendingLaunches.delete(taskId);
+      task.status = "cancelled";
+      task.endedAt = new Date().toISOString();
+      persist();
+      settleWaiters(taskId);
+      if (!launchQueue.length && launchTimer) {
+        clearTimeout(launchTimer);
+        launchTimer = null;
+      }
+      return { ...summarize(task), note: "queued task cancelled before launch" };
+    }
     if (task.status !== "running") {
       return { ...summarize(task), note: `task is already ${task.status}; nothing to cancel` };
     }
@@ -250,7 +317,7 @@ export function createTaskManager({
     const task = tasks.get(taskId);
     if (!task) throw noSuchTask(taskId);
     const cappedMs = Math.min(timeoutMs, MAX_WAIT_MS);
-    if (task.status !== "running") {
+    if (task.status !== "running" && task.status !== "queued") {
       return Promise.resolve(summarize(task));
     }
     return new Promise((resolve) => {
@@ -290,7 +357,7 @@ export function createTaskManager({
 
   function list() {
     const all = Array.from(tasks.values()).sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1));
-    const counts = { running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 };
+    const counts = { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 };
     for (const t of all) {
       if (counts[t.status] != null) counts[t.status]++;
     }
@@ -348,8 +415,8 @@ export function createTaskManager({
   function result(taskId, { full = false } = {}) {
     const task = tasks.get(taskId);
     if (!task) throw noSuchTask(taskId);
-    if (task.status === "running") {
-      return { taskId, status: "running", message: "task is still running; poll opencode_status first" };
+    if (task.status === "running" || task.status === "queued") {
+      return { taskId, status: task.status, message: `task is still ${task.status}; poll opencode_status first` };
     }
 
     // opencode's own steps look like: text (narration) -> tool_use -> step_finish

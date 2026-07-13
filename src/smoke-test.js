@@ -39,7 +39,7 @@ for (let i = 0; i < 40; i++) {
   const statusRes = await client.callTool({ name: "opencode_status", arguments: { task_id: taskId } });
   last = decode(statusRes.content[0].text);
   console.log(`[t+${i * 2}s]`, last.status);
-  if (last.status !== "running") break;
+  if (last.status !== "running" && last.status !== "queued") break;
   await new Promise((r) => setTimeout(r, 2000));
 }
 

@@ -13,7 +13,7 @@ import { createTaskManager } from "./tasks.js";
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, maxDispatchesPerWindow, dispatchWindowMs } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -28,6 +28,8 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn } = {}) {
     stateDir,
     spawnFn: spawnFn ?? (() => { throw new Error("spawnFn was not injected for this test"); }),
     killFn: killFn ?? (() => { throw new Error("killFn was not injected for this test"); }),
+    ...(maxDispatchesPerWindow != null ? { maxDispatchesPerWindow } : {}),
+    ...(dispatchWindowMs != null ? { dispatchWindowMs } : {}),
   });
 }
 
@@ -198,6 +200,68 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
   });
 });
 
+describe("dispatch queue", () => {
+  test("launches at most two tasks per window and starts queued tasks FIFO", async () => {
+    const children = [];
+    const mgr = makeManager({
+      maxDispatchesPerWindow: 2,
+      dispatchWindowMs: 20,
+      spawnFn: () => {
+        const child = fakeChild(1000 + children.length);
+        children.push(child);
+        return child;
+      },
+    });
+
+    const first = mgr.dispatch({ prompt: "first", directory: os.tmpdir() });
+    const second = mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
+    const third = mgr.dispatch({ prompt: "third", directory: os.tmpdir() });
+
+    assert.equal(first.status, "running");
+    assert.equal(second.status, "running");
+    assert.equal(third.status, "queued");
+    assert.equal(children.length, 2);
+
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    assert.equal(mgr.status(third.id).status, "running");
+    assert.equal(children.length, 3);
+  });
+
+  test("cancels a queued task without spawning or signaling it", () => {
+    const killCalls = [];
+    const mgr = makeManager({
+      maxDispatchesPerWindow: 1,
+      dispatchWindowMs: 60000,
+      spawnFn: () => fakeChild(),
+      killFn: (pid, signal) => killCalls.push({ pid, signal }),
+    });
+
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir() });
+    const queued = mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
+    const cancelled = mgr.cancel(queued.id);
+
+    assert.equal(cancelled.status, "cancelled");
+    assert.match(cancelled.note, /cancelled before launch/);
+    assert.deepEqual(killCalls, []);
+  });
+
+  test("waits for a queued task to settle instead of returning immediately", async () => {
+    const mgr = makeManager({
+      maxDispatchesPerWindow: 1,
+      dispatchWindowMs: 60000,
+      spawnFn: () => fakeChild(),
+    });
+
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir() });
+    const queued = mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
+    const waiting = mgr.wait(queued.id, { timeoutMs: 100 });
+    mgr.cancel(queued.id);
+
+    assert.equal((await waiting).status, "cancelled");
+  });
+});
+
 describe("cancel()", () => {
   test("sends SIGTERM to the negative pid (process group), then escalates to SIGKILL after graceMs if still running", async () => {
     const child = fakeChild(777);
@@ -256,6 +320,11 @@ describe("cancel()", () => {
     assert.equal(mgr.status("t1").status, "unknown");
     const result = mgr.cancel("t1");
     assert.match(result.note, /task is already unknown; nothing to cancel/);
+  });
+
+  test("a persisted queued task reloads as 'unknown' and is never launched", () => {
+    const mgr = makeManager({ tasksFixture: [baseTask({ id: "t1", status: "queued", pid: null })] });
+    assert.equal(mgr.status("t1").status, "unknown");
   });
 });
 
@@ -335,7 +404,7 @@ describe("list()", () => {
   test("empty state is explicit, not an empty array", () => {
     const mgr = makeManager();
     const l = mgr.list();
-    assert.deepEqual(l.counts, { running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 });
+    assert.deepEqual(l.counts, { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 });
     assert.equal(l.tasks, "none found (this server process's lifetime)");
   });
 
@@ -348,7 +417,7 @@ describe("list()", () => {
         baseTask({ id: "t4", status: "running" }), // becomes "unknown" on load
       ],
     });
-    assert.deepEqual(mgr.list().counts, { running: 0, done: 1, crashed: 1, cancelled: 1, unknown: 1 });
+    assert.deepEqual(mgr.list().counts, { queued: 0, running: 0, done: 1, crashed: 1, cancelled: 1, unknown: 1 });
   });
 
   test("rows use the minimal 4-field schema, not the full detail object", () => {
