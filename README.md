@@ -65,9 +65,9 @@ Once a task is `done` or `crashed`, parses its log (opencode's own
 `--format json` NDJSON event stream, one JSON object per line) into two
 fields:
 
-- `message`: only the model's final turn, the `text` events belonging to
+- `message`: the model's final turn only, the `text` events belonging to
   the messageID whose `step_finish` reason was `"stop"`. This is the actual
-  answer, not narration from earlier steps.
+  answer; narration from earlier steps lives in `narration` instead.
 - `narration`: every `text` event across every step, in order, separated by
   blank lines. Useful when a run does several tool calls with commentary in
   between and you want the fuller picture, not just the closing line.
@@ -115,12 +115,13 @@ Lists every task known to this server process, newest first.
 
 ## Limitations and follow-ups
 
-- **State doesn't survive a server restart faithfully.** If the MCP server
-  process restarts while a task is still running, the new process has no
-  child-process handle to listen for that task's `exit` event (that handle
-  exists only in the process that called `spawn`). On reload, any task that
-  was `"running"` in `tasks.json` is relabeled `"unknown"` rather than
-  reported as a possibly-stale `"running"`. The underlying `opencode`
+- **State survives only for the current server process's lifetime.** If the
+  MCP server process restarts while a task is still running, the new
+  process has no child-process handle to listen for that task's `exit`
+  event (that handle exists only in the process that called `spawn`). On
+  reload, the server relabels any task still marked `"running"` in
+  `tasks.json` as `"unknown"` instead of reporting a possibly-stale
+  `"running"`. The underlying `opencode`
   process, if still alive, keeps running and writing its log: inspect the
   log file directly, or run `opencode session list`, but this server won't
   re-attach a status watcher to it. A follow-up could periodically recheck
