@@ -1,8 +1,13 @@
 #!/usr/bin/env node
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { encode } from "@toon-format/toon";
 import { z } from "zod";
-import * as tasks from "./tasks.js";
+import { defaultTaskManager as tasks } from "./tasks.js";
+
+function toon(value) {
+  return { content: [{ type: "text", text: encode(value) }] };
+}
 
 const server = new McpServer({
   name: "opencode-cc-tool",
@@ -38,7 +43,7 @@ server.registerTool(
   },
   async ({ prompt, directory, model, variant, session_id }) => {
     const task = tasks.dispatch({ prompt, directory, model, variant, sessionId: session_id });
-    return { content: [{ type: "text", text: JSON.stringify(task, null, 2) }] };
+    return toon(task);
   }
 );
 
@@ -58,7 +63,7 @@ server.registerTool(
   },
   async ({ task_id, grace_ms }) => {
     const c = tasks.cancel(task_id, grace_ms != null ? { graceMs: grace_ms } : undefined);
-    return { content: [{ type: "text", text: JSON.stringify(c, null, 2) }] };
+    return toon(c);
   }
 );
 
@@ -78,7 +83,7 @@ server.registerTool(
   },
   async ({ task_id, timeout_ms }) => {
     const s = await tasks.wait(task_id, timeout_ms != null ? { timeoutMs: timeout_ms } : undefined);
-    return { content: [{ type: "text", text: JSON.stringify(s, null, 2) }] };
+    return toon(s);
   }
 );
 
@@ -94,7 +99,7 @@ server.registerTool(
   },
   async ({ task_id }) => {
     const s = tasks.status(task_id);
-    return { content: [{ type: "text", text: JSON.stringify(s, null, 2) }] };
+    return toon(s);
   }
 );
 
@@ -103,14 +108,18 @@ server.registerTool(
   {
     title: "Fetch opencode task result",
     description:
-      "Return the final assistant message and metadata (tokens, cost, session id) for a finished task, parsed from opencode's own --format json event stream. `message` is only the model's last turn (after all tool calls finish); `narration` includes intermediate step narration too, in order. Errors politely if the task is still running.",
+      "Return the final assistant message and metadata (tokens, cost, session id) for a finished task, parsed from opencode's own --format json event stream. `message` is only the model's last turn (after all tool calls finish); `narration` includes intermediate step narration too, in order, truncated to 2000 chars by default. Errors politely if the task is still running.",
     inputSchema: {
       task_id: z.string().describe("Task id returned by opencode_dispatch."),
+      full: z
+        .boolean()
+        .optional()
+        .describe("Return the complete, untruncated narration instead of the 2000-char preview. Defaults to false."),
     },
   },
-  async ({ task_id }) => {
-    const r = tasks.result(task_id);
-    return { content: [{ type: "text", text: JSON.stringify(r, null, 2) }] };
+  async ({ task_id, full }) => {
+    const r = tasks.result(task_id, { full: !!full });
+    return toon(r);
   }
 );
 
@@ -123,7 +132,7 @@ server.registerTool(
   },
   async () => {
     const l = tasks.list();
-    return { content: [{ type: "text", text: JSON.stringify(l, null, 2) }] };
+    return toon(l);
   }
 );
 

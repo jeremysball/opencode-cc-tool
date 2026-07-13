@@ -31,6 +31,15 @@ log text.
 
 ## Tools
 
+Every tool below returns [TOON](https://toonformat.dev/) (Token-Oriented
+Object Notation), not JSON — ~40% fewer tokens for the same data, and the
+tabular form (`opencode_list`) reads as a compact header-plus-rows table
+instead of a repeated-keys array. Follows the
+[AXI](https://github.com/kunchenguid/axi) design principles for
+agent-facing CLIs/tools: minimal per-row schemas, explicit empty states,
+`error:`/`help:` pairs on failure, and a `next` hint on responses where the
+follow-up call isn't obvious.
+
 ### `opencode_dispatch(prompt, directory, model?, variant?, session_id?)`
 
 Starts `opencode run --dir <directory> --auto --format json -- <prompt>` as
@@ -213,10 +222,61 @@ claude mcp list
 claude mcp get opencode-cc-tool
 ```
 
-## Smoke tests (standalone, no Claude Code needed)
+## Testing
 
-Each drives the server over stdio using the MCP SDK's `Client`, exactly as
-Claude Code would.
+Two layers, deliberately kept separate: unit tests never touch a real
+`opencode` process; integration tests only ever touch a real one.
+
+### Unit tests (`npm test` / `npm run test:unit`)
+
+```bash
+npm test
+```
+
+33 tests in `src/tasks.test.js`, using Node's built-in `node:test` (no test
+framework dependency), covering `src/tasks.js`'s task-lifecycle logic:
+input validation, the `error:`/`help:` message format shared by every
+lookup function, `list()`'s counts and empty state, `result()`'s
+message/narration parsing and 2000-char truncation, and the full
+dispatch → exit/error → settle lifecycle (`done`, `crashed`, `cancelled`,
+spawn `error`) including `cancel()`'s SIGTERM-then-SIGKILL escalation
+timer. Runs in well under a second, deterministically, with no network or
+subprocess calls.
+
+**How they avoid spawning real processes: dependency injection.**
+`tasks.js` exports `createTaskManager({ spawnFn, killFn, stateDir })`, a
+factory rather than a module-level singleton. The real server
+(`server.js`) imports `defaultTaskManager`, a single instance built with
+the real `child_process.spawn` and `process.kill`. Tests instead call
+`createTaskManager()` directly with:
+
+- a fake `spawnFn` returning a plain `EventEmitter` (with `.pid` and a
+  no-op `.unref()`) that the test drives itself via
+  `child.emit("exit", code, signal)` / `child.emit("error", err)` — no
+  real subprocess, no timing to race
+- a fake `killFn` that records calls instead of sending real OS signals,
+  letting tests assert exactly which pid/signal pairs `cancel()` sent
+  (including the negative-pid-then-plain-pid ESRCH fallback) without ever
+  touching a real process group
+- an isolated temp `stateDir` per test, so `tasks.json`/`logs/` never
+  collide across tests or with a real server's state
+
+Both fakes default to throwing loudly if called without being explicitly
+injected, so a test that forgets to inject one fails immediately instead
+of silently spawning something real.
+
+### Integration tests (`npm run test:integration`)
+
+```bash
+npm run test:integration
+```
+
+Runs all three smoke tests below in sequence, each driving the real
+server over stdio via the MCP SDK's `Client`, exactly as Claude Code
+would, dispatching real `opencode run` calls (real tokens, real cost, a
+minute or so total). Each defaults its working directory to this
+package's own root if no argument is given; pass one explicitly to run
+against a different directory:
 
 ```bash
 node src/smoke-test.js /workspace/opencode-cc-tool         # dispatch, poll status, fetch result; expects PONG
@@ -225,4 +285,7 @@ node src/wait-smoke-test.js /workspace/opencode-cc-tool    # opencode_wait resol
 ```
 
 Each prints a `... SMOKE TEST PASSED` or `FAILED` line and exits
-accordingly.
+accordingly. These are the only tests that exercise the real `spawn`
+call, real signal delivery to a real process group, and TOON encoding
+over the actual stdio transport — the things dependency injection
+deliberately keeps out of the unit tests above.

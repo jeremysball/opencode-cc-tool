@@ -1,5 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { decode } from "@toon-format/toon";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -10,28 +11,24 @@ const transport = new StdioClientTransport({ command: process.execPath, args: [s
 const client = new Client({ name: "wait-smoke-test", version: "0.0.1" });
 await client.connect(transport);
 
-const dirArg = process.argv[2];
-if (!dirArg) {
-  console.error("usage: node wait-smoke-test.js <absolute-directory>");
-  process.exit(2);
-}
+const dirArg = process.argv[2] || path.join(__dirname, "..");
 
 console.log("== case 1: opencode_wait resolves on real completion (short task, long-ish cap) ==");
-const d1 = JSON.parse(
+const d1 = decode(
   (await client.callTool({
     name: "opencode_dispatch",
     arguments: { prompt: "Reply with the word PONG and nothing else.", directory: dirArg, model: "opencode-go/minimax-m3" },
   })).content[0].text
 );
 const t1Start = Date.now();
-const w1 = JSON.parse(
+const w1 = decode(
   (await client.callTool({ name: "opencode_wait", arguments: { task_id: d1.id, timeout_ms: 30000 } })).content[0].text
 );
 const t1Elapsed = Date.now() - t1Start;
 console.log(`resolved after ${t1Elapsed}ms:`, w1.status, w1.exitCode);
 
 console.log("\n== case 2: opencode_wait hits its cap and returns 'running' (long task, short cap) ==");
-const d2 = JSON.parse(
+const d2 = decode(
   (await client.callTool({
     name: "opencode_dispatch",
     arguments: {
@@ -42,19 +39,19 @@ const d2 = JSON.parse(
   })).content[0].text
 );
 const t2Start = Date.now();
-const w2 = JSON.parse(
+const w2 = decode(
   (await client.callTool({ name: "opencode_wait", arguments: { task_id: d2.id, timeout_ms: 3000 } })).content[0].text
 );
 const t2Elapsed = Date.now() - t2Start;
 console.log(`returned after ${t2Elapsed}ms:`, w2.status);
 
 console.log("\n== cleaning up the long task ==");
-const cancelRes = JSON.parse(
+const cancelRes = decode(
   (await client.callTool({ name: "opencode_cancel", arguments: { task_id: d2.id, grace_ms: 3000 } })).content[0].text
 );
 console.log(cancelRes.note);
 await new Promise((r) => setTimeout(r, 2000));
-const finalStatus = JSON.parse(
+const finalStatus = decode(
   (await client.callTool({ name: "opencode_status", arguments: { task_id: d2.id } })).content[0].text
 );
 console.log("final status:", finalStatus.status);

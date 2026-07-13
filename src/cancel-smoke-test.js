@@ -11,11 +11,7 @@ const transport = new StdioClientTransport({ command: process.execPath, args: [s
 const client = new Client({ name: "cancel-smoke-test", version: "0.0.1" });
 await client.connect(transport);
 
-const dirArg = process.argv[2];
-if (!dirArg) {
-  console.error("usage: node cancel-smoke-test.js <absolute-directory>");
-  process.exit(2);
-}
+const dirArg = process.argv[2] || path.join(__dirname, "..");
 
 console.log("== opencode_dispatch (long-running: sleep 60 via bash) ==");
 const dispatchRes = await client.callTool({
@@ -26,7 +22,7 @@ const dispatchRes = await client.callTool({
     model: "opencode-go/minimax-m3",
   },
 });
-const dispatched = JSON.parse(dispatchRes.content[0].text);
+const dispatched = decode(dispatchRes.content[0].text);
 console.log(dispatched);
 const taskId = dispatched.id;
 const pid = dispatched.pid;
@@ -50,13 +46,13 @@ const cancelRes = await client.callTool({
   name: "opencode_cancel",
   arguments: { task_id: taskId, grace_ms: 4000 },
 });
-console.log(JSON.parse(cancelRes.content[0].text));
+console.log(decode(cancelRes.content[0].text));
 
 console.log("\n== polling opencode_status until settled ==");
 let last = null;
 for (let i = 0; i < 20; i++) {
   const statusRes = await client.callTool({ name: "opencode_status", arguments: { task_id: taskId } });
-  last = JSON.parse(statusRes.content[0].text);
+  last = decode(statusRes.content[0].text);
   console.log(`[t+${i}s]`, last.status, last.signal ? `signal=${last.signal}` : "");
   if (last.status !== "running") break;
   await new Promise((r) => setTimeout(r, 1000));
