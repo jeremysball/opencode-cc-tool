@@ -71,8 +71,13 @@ export function createTaskManager({
   }
 
   function summarize(task) {
-    const { promptPreview, id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested } = task;
-    return { id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath, promptPreview, cancelRequested: !!cancelRequested };
+    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested } = task;
+    return {
+      id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath,
+      promptPreview,
+      ...(promptTotalChars != null ? { promptTotalChars } : {}),
+      cancelRequested: !!cancelRequested,
+    };
   }
 
   // Minimal per-row schema for opencode_list: an agent scanning a task list
@@ -153,6 +158,7 @@ export function createTaskManager({
       signal: null,
       logPath,
       promptPreview: prompt.length > 200 ? prompt.slice(0, 200) + "…" : prompt,
+      promptTotalChars: prompt.length > 200 ? prompt.length : null,
       spawnError: null,
       cancelRequested: false,
     };

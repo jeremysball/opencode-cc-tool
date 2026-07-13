@@ -117,6 +117,23 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     assert.deepEqual(captured.slice(6, 10), ["-m", "openai/gpt-5.6-luna", "--variant", "high"]);
   });
 
+  test("a short prompt is returned verbatim in promptPreview, with no promptTotalChars hint", () => {
+    const mgr = makeManager({ spawnFn: () => fakeChild() });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    assert.equal(dispatched.promptPreview, "hi");
+    assert.equal("promptTotalChars" in dispatched, false);
+  });
+
+  test("a long prompt is truncated in promptPreview, with a promptTotalChars hint (AXI content-truncation)", () => {
+    const mgr = makeManager({ spawnFn: () => fakeChild() });
+    const longPrompt = "x".repeat(500);
+    const dispatched = mgr.dispatch({ prompt: longPrompt, directory: os.tmpdir() });
+    assert.equal(dispatched.promptPreview, "x".repeat(200) + "…");
+    assert.equal(dispatched.promptTotalChars, 500);
+    // The hint must survive every lookup path, not just the dispatch() return.
+    assert.equal(mgr.status(dispatched.id).promptTotalChars, 500);
+  });
+
   test("a clean exit(0) settles the task to 'done'", () => {
     const child = fakeChild(555);
     const mgr = makeManager({ spawnFn: () => child });
