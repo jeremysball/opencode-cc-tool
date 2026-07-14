@@ -366,6 +366,17 @@ describe("status() log activity (tells a stuck-before-first-event task apart fro
     assert.equal(s.logHasEvent, false);
   });
 
+  test("reports zero bytes but a real mtime when the log file exists but is empty", () => {
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "t1", status: "running", logPath: path.join(logDir, "t1.ndjson") })],
+      logs: { "t1.ndjson": "" },
+    });
+    const s = mgr.status("t1");
+    assert.equal(s.logBytesWritten, 0);
+    assert.ok(s.logLastWriteAt);
+    assert.equal(s.logHasEvent, false);
+  });
+
   test("reports nonzero bytes but no event when the log has been created but holds no parseable JSON line", () => {
     const mgr = makeManager({
       tasksFixture: (logDir) => [baseTask({ id: "t1", status: "running", logPath: path.join(logDir, "t1.ndjson") })],
@@ -386,6 +397,15 @@ describe("status() log activity (tells a stuck-before-first-event task apart fro
     const s = mgr.status("t1");
     assert.ok(s.logBytesWritten > 0);
     assert.equal(s.logHasEvent, true);
+  });
+
+  test("skips leading non-JSON lines (e.g. stderr noise) and still finds a later JSON line", () => {
+    const log = ["not json", "also not json", JSON.stringify({ type: "session", sessionID: "ses_1" })].join("\n");
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "t1", status: "running", logPath: path.join(logDir, "t1.ndjson") })],
+      logs: { "t1.ndjson": log },
+    });
+    assert.equal(mgr.status("t1").logHasEvent, true);
   });
 });
 
