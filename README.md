@@ -68,7 +68,7 @@ rolling five-second window start immediately; later tasks return
 - `TASKFERRY_DISPATCH_WINDOW_MS`: rolling-window duration in
   milliseconds. Defaults to `5000`.
 
-### `taskferry_wait(task_id, timeout_ms?, tail_chars?)`
+### `taskferry_poll(task_id, timeout_ms?, tail_chars?)`
 
 Blocks until the task's real `exit` event fires, or `timeout_ms` elapses
 (capped at 45000 regardless of what's passed, to stay under Claude Code's
@@ -178,7 +178,7 @@ rejected as of mid-2026:
   channels are a separate registration path. Worth revisiting if this tool
   needs true async push later, but out of scope for now.
 
-`taskferry_wait` is the practical middle ground: one blocking call that
+`taskferry_poll` is the practical middle ground: one blocking call that
 resolves the moment the task's exit event fires, capped well under Claude
 Code's MCP tool-call timeout so it degrades to a clean "still running"
 rather than an error. It gets Agent-tool-like ergonomics (dispatch, then
@@ -346,7 +346,7 @@ against a different directory:
 ```bash
 node src/smoke-test.js          # dispatch, poll status, fetch result; expects PONG
 node src/cancel-smoke-test.js   # dispatch a sleep, cancel it, confirm the process group is gone
-node src/wait-smoke-test.js     # taskferry_wait resolving early and hitting its cap
+node src/poll-smoke-test.js     # taskferry_poll resolving early and hitting its cap
 ```
 
 Each prints a `... SMOKE TEST PASSED` or `FAILED` line and exits

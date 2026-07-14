@@ -144,7 +144,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
     assert.equal(dispatched.status, "running");
     assert.equal(dispatched.pid, 555);
-    assert.match(dispatched.next, /taskferry_wait or taskferry_status/);
+    assert.match(dispatched.next, /taskferry_poll or taskferry_status/);
 
     child.emit("exit", 0, null);
 
@@ -257,7 +257,7 @@ describe("dispatch queue", () => {
 
     mgr.dispatch({ prompt: "first", directory: os.tmpdir() });
     const queued = mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
-    const waiting = mgr.wait(queued.id, { timeoutMs: 100 });
+    const waiting = mgr.poll(queued.id, { timeoutMs: 100 });
     mgr.cancel(queued.id);
 
     assert.equal((await waiting).status, "cancelled");
@@ -349,9 +349,9 @@ describe("unknown task_id (status/cancel/wait/result share one error path)", () 
     assert.throws(() => mgr.result("nope"), /error: unknown task_id: nope/);
   });
 
-  test("wait() throws synchronously (not a rejected promise) for an unknown id", () => {
+  test("poll() throws synchronously (not a rejected promise) for an unknown id", () => {
     const mgr = makeManager();
-    assert.throws(() => mgr.wait("nope"), /error: unknown task_id: nope/);
+    assert.throws(() => mgr.poll("nope"), /error: unknown task_id: nope/);
   });
 });
 
@@ -409,10 +409,10 @@ describe("status() log activity (tells a stuck-before-first-event task apart fro
   });
 });
 
-describe("wait()", () => {
+describe("poll()", () => {
   test("resolves immediately for a non-running task", async () => {
     const mgr = makeManager({ tasksFixture: [baseTask({ id: "t1", status: "crashed", exitCode: 1 })] });
-    const settled = await mgr.wait("t1", { timeoutMs: 50 });
+    const settled = await mgr.poll("t1", { timeoutMs: 50 });
     assert.equal(settled.status, "crashed");
     assert.equal(settled.exitCode, 1);
   });
@@ -422,7 +422,7 @@ describe("wait()", () => {
     const mgr = makeManager({ spawnFn: () => child });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
 
-    const waitPromise = mgr.wait(dispatched.id, { timeoutMs: 5000 });
+    const waitPromise = mgr.poll(dispatched.id, { timeoutMs: 5000 });
     child.emit("exit", 0, null);
     const settled = await waitPromise;
     assert.equal(settled.status, "done");
@@ -433,7 +433,7 @@ describe("wait()", () => {
     const mgr = makeManager({ spawnFn: () => child });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
 
-    const settled = await mgr.wait(dispatched.id, { timeoutMs: 20 });
+    const settled = await mgr.poll(dispatched.id, { timeoutMs: 20 });
     assert.equal(settled.status, "running");
     assert.equal("outputTail" in settled, false);
   });
@@ -448,7 +448,7 @@ describe("wait()", () => {
       JSON.stringify({ type: "text", part: { messageID: "m1", text: output } })
     );
 
-    const settled = await mgr.wait(dispatched.id, { timeoutMs: 20, tailChars: 6 });
+    const settled = await mgr.poll(dispatched.id, { timeoutMs: 20, tailChars: 6 });
     assert.equal(settled.status, "running");
     assert.equal(settled.outputTail, " chunk");
     assert.equal(settled.outputTailTotalChars, output.length);

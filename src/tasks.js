@@ -10,7 +10,7 @@ const DEFAULT_STATE_DIR =
   path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "taskferry");
 
 // The MCP tool-call default timeout in Claude Code is 60s (MCP_TOOL_TIMEOUT).
-// Cap the internal wait below that so a long task returns a clean
+// Cap the internal poll below that so a long task returns a clean
 // "still running" instead of the whole tool call erroring out from the
 // client side with no result at all.
 const MAX_WAIT_MS = 45000;
@@ -105,7 +105,7 @@ export function createTaskManager({
   // persist(), and a Timeout isn't serializable data.
   const escalationTimers = new Map();
 
-  // Pending taskferry_wait callbacks, keyed by task id. Lets a single MCP tool
+  // Pending taskferry_poll callbacks, keyed by task id. Lets a single MCP tool
   // call block until the child's exit event fires (or a timeout elapses)
   // instead of the caller round-tripping taskferry_status in a loop. Not
   // persisted or shared across a server restart, same as the tasks map itself.
@@ -228,8 +228,8 @@ export function createTaskManager({
     return {
       ...summary,
       next: task.status === "queued"
-        ? `Task is queued; run taskferry_wait or taskferry_status with task_id "${id}" to check when it starts`
-        : `Run taskferry_wait or taskferry_status with task_id "${id}" to check progress`,
+        ? `Task is queued; run taskferry_poll or taskferry_status with task_id "${id}" to check when it starts`
+        : `Run taskferry_poll or taskferry_status with task_id "${id}" to check progress`,
     };
   }
 
@@ -374,7 +374,7 @@ export function createTaskManager({
       sourceLogBytes: snapshot.sourceLogBytes,
       summaryInputBytes: snapshot.inputBytes,
       summaryTask: { id, status: task.status, model: task.model },
-      next: `Run taskferry_wait with task_id "${id}", then taskferry_result with task_id "${id}"`,
+      next: `Run taskferry_poll with task_id "${id}", then taskferry_result with task_id "${id}"`,
     };
   }
 
@@ -553,7 +553,7 @@ export function createTaskManager({
   // bytes but no parseable event yet" from "at least one event landed". A
   // caller polling taskferry_status on a task that's been "running" for a
   // long time can use this to tell a genuinely stuck process apart from one
-  // that's just slow, without waiting out a full taskferry_wait timeout.
+  // that's just slow, without waiting out a full taskferry_poll timeout.
   const LOG_ACTIVITY_SCAN_BYTES = 64 * 1024;
   function logActivity(logPath) {
     let stat;
@@ -596,7 +596,7 @@ export function createTaskManager({
     return { ...summarize(task), ...logActivity(task.logPath) };
   }
 
-  function wait(taskId, { timeoutMs = MAX_WAIT_MS, tailChars } = {}) {
+  function poll(taskId, { timeoutMs = MAX_WAIT_MS, tailChars } = {}) {
     ensureStateLoaded();
     const task = tasks.get(taskId);
     if (!task) throw noSuchTask(taskId);
@@ -738,7 +738,7 @@ export function createTaskManager({
         text: "none observed yet",
         textTotalChars: 0,
         truncated: false,
-        help: `Run taskferry_wait with task_id "${taskId}" to wait for task output`,
+        help: `Run taskferry_poll with task_id "${taskId}" to wait for task output`,
       };
     }
     const codePoints = Array.from(text);
@@ -854,7 +854,7 @@ export function createTaskManager({
     }, fields);
   }
 
-  return { dispatch, cancel, status, wait, list, result, tail, summarize: summarizeTask, paths: { STATE_DIR: stateDir, LOG_DIR, SUMMARY_DIR, TASKS_FILE } };
+  return { dispatch, cancel, status, poll, list, result, tail, summarize: summarizeTask, paths: { STATE_DIR: stateDir, LOG_DIR, SUMMARY_DIR, TASKS_FILE } };
 }
 
 // The one real instance the MCP server uses: real spawn, real process.kill,

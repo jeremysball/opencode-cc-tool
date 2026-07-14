@@ -19,7 +19,7 @@ server.registerTool(
   {
     title: "Dispatch taskferry task",
     description:
-      "Queue an `opencode run` for background execution as a directly-spawned child process (no tmux, no shared visibility into the orchestration layer) and return a task_id immediately. The server starts at most two tasks in each rolling five-second window by default. After dispatching, call taskferry_wait to block until the task finishes or times out; if it times out, call taskferry_tail to read the latest output and report the task's current status to the user. Once the task is done, call taskferry_result to fetch the final result.",
+      "Queue an `opencode run` for background execution as a directly-spawned child process (no tmux, no shared visibility into the orchestration layer) and return a task_id immediately. The server starts at most two tasks in each rolling five-second window by default. After dispatching, call taskferry_poll to block until the task finishes or times out; if it times out, call taskferry_tail to read the latest output and report the task's current status to the user. Once the task is done, call taskferry_result to fetch the final result.",
     inputSchema: {
       prompt: z.string().describe("The message/prompt to send to opencode."),
       directory: z
@@ -68,11 +68,11 @@ server.registerTool(
 );
 
 server.registerTool(
-  "taskferry_wait",
+  "taskferry_poll",
   {
     title: "Block until a taskferry task finishes",
     description:
-      "Block on a queued or running task until it exits (or a timeout) and return its status once settled. The closest analog to the built-in Agent tool's auto-resume behavior available over plain MCP request/response, without a poll loop. Capped internally at 45s so the call returns cleanly instead of hitting Claude Code's own MCP tool-call timeout; if status is still queued or running when it returns, call taskferry_wait again. Pass tail_chars to get the trailing narration when the task is still running after the timeout; then call taskferry_tail to read more and report the task's current progress to the user. Always inform the user of the task's status after calling this tool.",
+      "Block on a queued or running task until it exits (or a timeout) and return its status once settled. The closest analog to the built-in Agent tool's auto-resume behavior available over plain MCP request/response, without a poll loop. Capped internally at 45s so the call returns cleanly instead of hitting Claude Code's own MCP tool-call timeout; if status is still queued or running when it returns, call taskferry_poll again. Pass tail_chars to get the trailing narration when the task is still running after the timeout; then call taskferry_tail to read more and report the task's current progress to the user. Always inform the user of the task's status after calling this tool.",
     inputSchema: {
       task_id: z.string().describe("Task id returned by taskferry_dispatch."),
       timeout_ms: z
@@ -84,11 +84,11 @@ server.registerTool(
         .int()
         .positive()
         .optional()
-        .describe("When the wait times out and the task is still running, return this many trailing narration characters. Use this to report progress to the user while the task continues."),
+        .describe("When the poll times out and the task is still running, return this many trailing narration characters. Use this to report progress to the user while the task continues."),
     },
   },
   async ({ task_id, timeout_ms, tail_chars }) => {
-    const s = await tasks.wait(task_id, {
+    const s = await tasks.poll(task_id, {
       ...(timeout_ms != null ? { timeoutMs: timeout_ms } : {}),
       ...(tail_chars != null ? { tailChars: tail_chars } : {}),
     });
@@ -117,7 +117,7 @@ server.registerTool(
   {
     title: "Read the latest taskferry text",
     description:
-      "Return the last requested Unicode code points of the most recent parsed text event for a task. Reads locally and never sends task content to a model. Use this after taskferry_wait times out to check what the task is doing, then report its progress to the user.",
+      "Return the last requested Unicode code points of the most recent parsed text event for a task. Reads locally and never sends task content to a model. Use this after taskferry_poll times out to check what the task is doing, then report its progress to the user.",
     inputSchema: {
       task_id: z.string().describe("Task id returned by taskferry_dispatch."),
       chars: z.number().int().positive().max(65536).optional().describe("Number of Unicode code points to return. Defaults to 1000; maximum 65536."),
