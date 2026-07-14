@@ -180,6 +180,10 @@ const DEFAULT_DISPATCH_WINDOW_MS = positiveInteger(
   Number(process.env.TASKFERRY_DISPATCH_WINDOW_MS),
   5000
 );
+const DEFAULT_MAX_CONCURRENT_TASKS = positiveInteger(
+  Number(process.env.TASKFERRY_MAX_CONCURRENT_TASKS),
+  4
+);
 const DEFAULT_ADVISOR_SESSION_TTL_MS = positiveInteger(
   Number(process.env.TASKFERRY_ADVISOR_SESSION_TTL_MS),
   30 * 60 * 1000
@@ -218,6 +222,7 @@ export function createTaskManager({
   stateDir = DEFAULT_STATE_DIR,
   maxDispatchesPerWindow = DEFAULT_MAX_DISPATCHES_PER_WINDOW,
   dispatchWindowMs = DEFAULT_DISPATCH_WINDOW_MS,
+  maxConcurrentTasks = DEFAULT_MAX_CONCURRENT_TASKS,
   advisorSessionTtlMs = DEFAULT_ADVISOR_SESSION_TTL_MS,
 } = {}) {
   const LOG_DIR = path.join(stateDir, "logs");
@@ -226,6 +231,7 @@ export function createTaskManager({
   const LOCK_FILE = path.join(stateDir, "tasks.lock");
   const dispatchLimit = positiveInteger(maxDispatchesPerWindow, DEFAULT_MAX_DISPATCHES_PER_WINDOW);
   const dispatchWindow = positiveInteger(dispatchWindowMs, DEFAULT_DISPATCH_WINDOW_MS);
+  const concurrencyLimit = positiveInteger(maxConcurrentTasks, DEFAULT_MAX_CONCURRENT_TASKS);
   const advisorTtl = positiveInteger(advisorSessionTtlMs, DEFAULT_ADVISOR_SESSION_TTL_MS);
   for (const dir of [stateDir, LOG_DIR, SUMMARY_DIR]) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -275,6 +281,7 @@ export function createTaskManager({
   const launchTimes = [];
   /** @type {NodeJS.Timeout|null} */
   let launchTimer = null;
+  let runningCount = 0;
   let modelsCache = { expiresAt: 0, output: "" };
   let summaryAgentVerifiedUntil = 0;
   /** @type {Error|null} */
@@ -624,7 +631,7 @@ export function createTaskManager({
     const now = Date.now();
     while (launchTimes.length && launchTimes[0] <= now - dispatchWindow) launchTimes.shift();
 
-    while (launchQueue.length && launchTimes.length < dispatchLimit) {
+    while (launchQueue.length && launchTimes.length < dispatchLimit && runningCount < concurrencyLimit) {
       const id = /** @type {string} */ (launchQueue.shift());
       const task = tasks.get(id);
       if (!task || task.status !== "queued") continue;
@@ -633,8 +640,9 @@ export function createTaskManager({
     }
 
     if (launchQueue.length && !launchTimer) {
-      const delay = Math.max(1, launchTimes[0] + dispatchWindow - Date.now());
-      launchTimer = setTimeout(launchQueuedTasks, delay);
+      const rateDelay = launchTimes.length >= dispatchLimit ? launchTimes[0] + dispatchWindow - Date.now() : 0;
+      const concurrencyDelay = runningCount >= concurrencyLimit ? 250 : 0;
+      launchTimer = setTimeout(launchQueuedTasks, Math.max(1, rateDelay, concurrencyDelay));
     }
   }
 
@@ -684,6 +692,7 @@ export function createTaskManager({
       logFd = null;
       task.status = "running";
       task.pid = /** @type {number} */ (child.pid);
+      runningCount++;
       persistTask(task.id);
 
       child.on("exit", (code, signal) => {
@@ -700,7 +709,9 @@ export function createTaskManager({
         if (parsedSessionId) task.sessionId = parsedSessionId;
         persistTask(task.id);
         cleanUpSnapshot();
+        runningCount--;
         settleWaiters(task.id);
+        launchQueuedTasks();
       });
 
       child.on("error", (err) => {
@@ -709,7 +720,9 @@ export function createTaskManager({
         task.endedAt = new Date().toISOString();
         persistTask(task.id);
         cleanUpSnapshot();
+        runningCount--;
         settleWaiters(task.id);
+        launchQueuedTasks();
       });
 
       child.unref();

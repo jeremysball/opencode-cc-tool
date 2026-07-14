@@ -13,7 +13,7 @@ import { createTaskManager } from "./tasks.js";
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -33,6 +33,7 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     ...(maxDispatchesPerWindow != null ? { maxDispatchesPerWindow } : {}),
     ...(dispatchWindowMs != null ? { dispatchWindowMs } : {}),
     ...(advisorSessionTtlMs != null ? { advisorSessionTtlMs } : {}),
+    ...(maxConcurrentTasks != null ? { maxConcurrentTasks } : {}),
   });
 }
 
@@ -295,6 +296,28 @@ describe("dispatch queue", () => {
     mgr.cancel(queued.id);
 
     assert.equal((await waiting).status, "cancelled");
+  });
+});
+
+describe("active-task concurrency cap (independent of the launch-rate window)", () => {
+  test("starts at most maxConcurrentTasks children; a 5th stays queued until one finishes", () => {
+    const children = [];
+    const mgr = makeManager({
+      spawnFn: () => {
+        const c = fakeChild(9000 + children.length);
+        children.push(c);
+        return c;
+      },
+      maxConcurrentTasks: 4,
+      maxDispatchesPerWindow: 10, // wide open, so only the concurrency cap is under test
+      dispatchWindowMs: 60000,
+    });
+    const dispatched = Array.from({ length: 5 }, (_, i) => mgr.dispatch({ prompt: `p${i}`, directory: os.tmpdir() }));
+    const statuses = () => dispatched.map((d) => mgr.status(d.id).status);
+    assert.deepEqual(statuses(), ["running", "running", "running", "running", "queued"]);
+
+    children[0].emit("exit", 0, null);
+    assert.deepEqual(statuses(), ["done", "running", "running", "running", "running"]);
   });
 });
 
