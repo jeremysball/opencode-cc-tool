@@ -13,7 +13,7 @@ import { createTaskManager } from "./tasks.js";
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, maxDispatchesPerWindow, dispatchWindowMs } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, maxDispatchesPerWindow, dispatchWindowMs } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -28,6 +28,7 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, maxDispatc
     stateDir,
     spawnFn: spawnFn ?? (() => { throw new Error("spawnFn was not injected for this test"); }),
     killFn: killFn ?? (() => { throw new Error("killFn was not injected for this test"); }),
+    listModelsFn: listModelsFn ?? (() => "opencode-go/deepseek-v4-flash\n"),
     ...(maxDispatchesPerWindow != null ? { maxDispatchesPerWindow } : {}),
     ...(dispatchWindowMs != null ? { dispatchWindowMs } : {}),
   });
@@ -526,5 +527,131 @@ describe("result()", () => {
     const r = mgr.result(dispatched.id);
     assert.equal(r.status, "running");
     assert.match(r.message, /still running/);
+  });
+
+  test("projects only requested fields while retaining the task envelope", () => {
+    const log = [
+      JSON.stringify({ type: "text", part: { messageID: "m1", text: "Final answer" } }),
+      JSON.stringify({ type: "step_finish", part: { messageID: "m1", reason: "stop" } }),
+    ].join("\n");
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "t1", logPath: path.join(logDir, "t1.ndjson") })],
+      logs: { "t1.ndjson": log },
+    });
+    assert.deepEqual(mgr.result("t1", { fields: ["message"] }), {
+      taskId: "t1",
+      status: "done",
+      message: "Final answer",
+    });
+  });
+
+  test("rejects a full narration request that omits narration from fields", () => {
+    const mgr = makeManager({ tasksFixture: [baseTask({ id: "t1" })] });
+    assert.throws(() => mgr.result("t1", { full: true, fields: ["message"] }), /full requires narration/);
+  });
+
+  test("returns null for selected fields unavailable on a running task", () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const task = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    assert.deepEqual(mgr.result(task.id, { fields: ["tokens"] }), {
+      taskId: task.id,
+      status: "running",
+      tokens: null,
+    });
+  });
+
+  test("does not expose partial output from an unknown summary task", () => {
+    const mgr = makeManager({
+      tasksFixture: [baseTask({ id: "t1", status: "running", summaryOf: { sourceTaskId: "source" } })],
+    });
+    const r = mgr.result("t1", { fields: ["message"] });
+    assert.equal(r.status, "unknown");
+    assert.match(r.message, /partial output is unavailable/);
+  });
+});
+
+describe("tail()", () => {
+  test("returns a Unicode-safe suffix of the latest text event", () => {
+    const log = [
+      JSON.stringify({ type: "text", part: { messageID: "m1", text: "older" } }),
+      JSON.stringify({ type: "text", part: { messageID: "m2", text: "alpha😀beta" } }),
+    ].join("\n");
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "t1", logPath: path.join(logDir, "t1.ndjson") })],
+      logs: { "t1.ndjson": log },
+    });
+    assert.deepEqual(mgr.tail("t1", { chars: 5 }), {
+      taskId: "t1",
+      status: "done",
+      text: "😀beta",
+      textTotalChars: 10,
+      truncated: true,
+    });
+  });
+
+  test("returns a definitive no-text response", () => {
+    const mgr = makeManager({ tasksFixture: [baseTask({ id: "t1" })] });
+    const r = mgr.tail("t1");
+    assert.equal(r.text, "none observed yet");
+    assert.equal(r.textTotalChars, 0);
+    assert.equal(r.truncated, false);
+  });
+
+  test("validates the requested suffix length", () => {
+    const mgr = makeManager({ tasksFixture: [baseTask({ id: "t1" })] });
+    assert.throws(() => mgr.tail("t1", { chars: 0 }), /chars must be a positive integer/);
+  });
+});
+
+describe("summarize()", () => {
+  test("uses an isolated tool-denied agent and private attachment", () => {
+    let captured;
+    const child = fakeChild();
+    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Investigated the issue" } });
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": log },
+      spawnFn: (command, args, options) => {
+        captured = { command, args, options };
+        return child;
+      },
+    });
+
+    const summary = mgr.summarize("source", { maxWords: 150 });
+    assert.equal(captured.command, "opencode");
+    assert.ok(captured.args.includes("--pure"));
+    assert.ok(captured.args.includes("--agent"));
+    assert.equal(captured.args.includes("--auto"), false);
+    const attachment = captured.args[captured.args.indexOf("-f") + 1];
+    assert.equal(fs.statSync(attachment).mode & 0o777, 0o600);
+    assert.equal(captured.options.cwd, mgr.paths.SUMMARY_DIR);
+    assert.match(captured.options.env.OPENCODE_CONFIG_CONTENT, /"\*":"deny"/);
+    assert.equal(summary.summaryTask.status, "running");
+
+    child.emit("exit", 0, null);
+    assert.equal(fs.existsSync(attachment), false);
+  });
+
+  test("does not spend a model call when no text has been observed", () => {
+    let spawned = false;
+    const mgr = makeManager({
+      tasksFixture: [baseTask({ id: "source" })],
+      spawnFn: () => { spawned = true; return fakeChild(); },
+    });
+    const result = mgr.summarize("source");
+    assert.equal(result.summary, "no model text observed yet");
+    assert.equal(spawned, false);
+  });
+
+  test("rejects an unavailable configured summary model before creating a task", () => {
+    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "progress" } });
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": log },
+      listModelsFn: () => "openai/gpt-5.6-luna\n",
+    });
+    assert.throws(() => mgr.summarize("source"), /summary model is unavailable/);
+    assert.equal(mgr.list().tasks.length, 1);
   });
 });

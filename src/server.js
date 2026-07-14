@@ -113,6 +113,34 @@ server.registerTool(
 );
 
 server.registerTool(
+  "opencode_tail",
+  {
+    title: "Read the latest opencode text",
+    description:
+      "Return the last requested Unicode code points of the most recent parsed text event for a task. Reads locally and never sends task content to a model.",
+    inputSchema: {
+      task_id: z.string().describe("Task id returned by opencode_dispatch."),
+      chars: z.number().int().positive().max(65536).optional().describe("Number of Unicode code points to return. Defaults to 1000; maximum 65536."),
+    },
+  },
+  async ({ task_id, chars }) => toon(tasks.tail(task_id, chars != null ? { chars } : undefined))
+);
+
+server.registerTool(
+  "opencode_summary",
+  {
+    title: "Summarize observed opencode progress",
+    description:
+      "Capture a bounded snapshot of a task's narration and queue an isolated DeepSeek summary task. The snapshot is sent to the configured summary-model provider; do not use this tool for narration containing secrets you do not want to send there.",
+    inputSchema: {
+      task_id: z.string().describe("Task id returned by opencode_dispatch."),
+      max_words: z.number().int().min(75).max(300).optional().describe("Target summary length. Defaults to 200 words; valid range is 75 through 300."),
+    },
+  },
+  async ({ task_id, max_words }) => toon(tasks.summarize(task_id, max_words != null ? { maxWords: max_words } : undefined))
+);
+
+server.registerTool(
   "opencode_result",
   {
     title: "Fetch opencode task result",
@@ -124,10 +152,15 @@ server.registerTool(
         .boolean()
         .optional()
         .describe("Return the complete, untruncated narration instead of the 2000-char preview. Defaults to false."),
+      fields: z
+        .array(z.enum(["message", "narration", "tokens", "cost", "sessionId", "exitCode", "signal", "spawnError", "logPath"]))
+        .min(1)
+        .optional()
+        .describe("Return only these result fields, plus taskId and status. Omit for the full backward-compatible result."),
     },
   },
-  async ({ task_id, full }) => {
-    const r = tasks.result(task_id, { full: !!full });
+  async ({ task_id, full, fields }) => {
+    const r = tasks.result(task_id, { full: !!full, ...(fields ? { fields } : {}) });
     return toon(r);
   }
 );

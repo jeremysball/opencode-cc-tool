@@ -99,7 +99,29 @@ process's actual exit event (`child.on("exit", ...)`), not from parsing
 output. `"unknown"` appears only if the server process restarted while the
 task was still running; see Limitations.
 
-### `opencode_result(task_id)`
+### `opencode_tail(task_id, chars?)`
+
+Returns the final `chars` Unicode code points of the newest parsed `text`
+event for a task. It reads the local task log only and never sends content to
+a model. `chars` defaults to 1000 and has a maximum of 65536. The response
+includes the complete event length and `truncated` so callers know whether the
+suffix omitted earlier content.
+
+### `opencode_summary(task_id, max_words?)`
+
+Captures a bounded snapshot of observed task narration and starts a separate
+summary task using `opencode-go/deepseek-v4-flash` by default. The summary is
+asynchronous: wait for the returned `summaryTask.id`, then call
+`opencode_result` on that ID.
+
+The snapshot is sent to the configured model provider. Do not summarize logs
+containing secrets you do not want to send to that provider. The summary child
+uses a private attachment, runs outside the source workspace, disables plugins,
+and denies every agent tool. Set `OPENCODE_CC_TOOL_SUMMARY_MODEL` to select an
+available replacement model. `max_words` is a target between 75 and 300 words;
+it defaults to 200.
+
+### `opencode_result(task_id, full?, fields?)`
 
 Once a task is `done` or `crashed`, parses its log (opencode's own
 `--format json` NDJSON event stream, one JSON object per line) into two
@@ -116,6 +138,11 @@ A single-step run (no tool calls) has `message === narration`. Also returns
 `sessionId`, `tokens`, and `cost` pulled from the `step_finish` events.
 Returns a polite "still running" message instead of a partial result if
 called too early.
+
+Pass `fields` to project only the data needed by the caller. For example,
+`fields: ["message"]` returns only `taskId`, `status`, and the final assistant
+turn. Omit `fields` for the complete backward-compatible result. `full: true`
+is valid only when the narration field is requested.
 
 Naively joining every `text` event regardless of step (an earlier version
 of this tool did exactly that) glues "I'm about to run `ls`" directly onto
