@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { promisify } from "node:util";
+import { withFileLock } from "./state-lock.js";
 
 /**
  * @typedef {object} SummaryOf
@@ -222,6 +223,7 @@ export function createTaskManager({
   const LOG_DIR = path.join(stateDir, "logs");
   const SUMMARY_DIR = path.join(stateDir, "summaries");
   const TASKS_FILE = path.join(stateDir, "tasks.json");
+  const LOCK_FILE = path.join(stateDir, "tasks.lock");
   const dispatchLimit = positiveInteger(maxDispatchesPerWindow, DEFAULT_MAX_DISPATCHES_PER_WINDOW);
   const dispatchWindow = positiveInteger(dispatchWindowMs, DEFAULT_DISPATCH_WINDOW_MS);
   const advisorTtl = positiveInteger(advisorSessionTtlMs, DEFAULT_ADVISOR_SESSION_TTL_MS);
@@ -299,27 +301,43 @@ export function createTaskManager({
     throw new Error(`error: could not read persisted task state: ${stateLoadError.message}\nhelp: repair ${TASKS_FILE} before using opencode task tools`);
   }
 
-  function persist() {
-    const all = Array.from(tasks.values());
-    const temporary = path.join(stateDir, `.tasks-${randomUUID()}.json`);
-    // Throwing from a `finally` would mask a real error from the try block
-    // above (e.g. a full disk on writeFileSync) with an unrelated cleanup
-    // failure. Defer the cleanup error and only surface it once the try
-    // block itself has succeeded.
-    /** @type {unknown} */
-    let cleanupError;
-    try {
-      fs.writeFileSync(temporary, JSON.stringify(all, null, 2), { mode: 0o600 });
-      fs.renameSync(temporary, TASKS_FILE);
-      fs.chmodSync(TASKS_FILE, 0o600);
-    } finally {
+  /**
+   * @param {string} taskId
+   */
+  function persistTask(taskId) {
+    withFileLock(LOCK_FILE, () => {
+      /** @type {Task[]} */
+      let current = [];
       try {
-        fs.unlinkSync(temporary);
+        current = JSON.parse(fs.readFileSync(TASKS_FILE, "utf8"));
       } catch (err) {
-        if (errCode(err) !== "ENOENT") cleanupError = err;
+        if (errCode(err) !== "ENOENT") throw err;
       }
-    }
-    if (cleanupError) throw cleanupError;
+      const byId = new Map(current.map((t) => [t.id, t]));
+      const local = tasks.get(taskId);
+      if (local) byId.set(taskId, local);
+      else byId.delete(taskId);
+      const all = Array.from(byId.values());
+      const temporary = path.join(stateDir, `.tasks-${randomUUID()}.json`);
+      // Throwing from a `finally` would mask a real error from the try block
+      // above (e.g. a full disk on writeFileSync) with an unrelated cleanup
+      // failure. Defer the cleanup error and only surface it once the try
+      // block itself has succeeded.
+      /** @type {unknown} */
+      let cleanupError;
+      try {
+        fs.writeFileSync(temporary, JSON.stringify(all, null, 2), { mode: 0o600 });
+        fs.renameSync(temporary, TASKS_FILE);
+        fs.chmodSync(TASKS_FILE, 0o600);
+      } finally {
+        try {
+          fs.unlinkSync(temporary);
+        } catch (err) {
+          if (errCode(err) !== "ENOENT") cleanupError = err;
+        }
+      }
+      if (cleanupError) throw cleanupError;
+    });
   }
 
   /**
@@ -423,7 +441,7 @@ export function createTaskManager({
       cancelRequested: false,
     };
     tasks.set(id, task);
-    persist();
+    persistTask(task.id);
     pendingLaunches.set(id, { prompt, directory, model: resolvedModel, variant: task.variant, sessionId });
     launchQueue.push(id);
     launchQueuedTasks();
@@ -586,7 +604,7 @@ export function createTaskManager({
       summaryOf,
     };
     tasks.set(id, task);
-    persist();
+    persistTask(task.id);
     pendingLaunches.set(id, { kind: "summary", model: SUMMARY_MODEL, snapshotPath, env });
     launchQueue.push(id);
     launchQueuedTasks();
@@ -666,7 +684,7 @@ export function createTaskManager({
       logFd = null;
       task.status = "running";
       task.pid = /** @type {number} */ (child.pid);
-      persist();
+      persistTask(task.id);
 
       child.on("exit", (code, signal) => {
         const timer = escalationTimers.get(task.id);
@@ -680,7 +698,7 @@ export function createTaskManager({
         task.endedAt = new Date().toISOString();
         const parsedSessionId = readSessionIdFromLog(task.logPath);
         if (parsedSessionId) task.sessionId = parsedSessionId;
-        persist();
+        persistTask(task.id);
         cleanUpSnapshot();
         settleWaiters(task.id);
       });
@@ -689,7 +707,7 @@ export function createTaskManager({
         task.status = "crashed";
         task.spawnError = errMessage(err);
         task.endedAt = new Date().toISOString();
-        persist();
+        persistTask(task.id);
         cleanUpSnapshot();
         settleWaiters(task.id);
       });
@@ -700,7 +718,7 @@ export function createTaskManager({
       task.status = "crashed";
       task.spawnError = errMessage(err);
       task.endedAt = new Date().toISOString();
-      persist();
+      persistTask(task.id);
       cleanUpSnapshot();
       settleWaiters(task.id);
     }
@@ -729,7 +747,7 @@ export function createTaskManager({
       }
       task.status = "cancelled";
       task.endedAt = new Date().toISOString();
-      persist();
+      persistTask(task.id);
       settleWaiters(taskId);
       if (!launchQueue.length && launchTimer) {
         clearTimeout(launchTimer);
@@ -745,7 +763,7 @@ export function createTaskManager({
     }
 
     task.cancelRequested = true;
-    persist();
+    persistTask(task.id);
     sendSignal(task.pid, "SIGTERM");
 
     const timer = setTimeout(() => {

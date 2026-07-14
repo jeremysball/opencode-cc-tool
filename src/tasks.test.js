@@ -68,6 +68,39 @@ function baseTask(overrides = {}) {
   };
 }
 
+describe("persistTask() durability across concurrent manager instances", () => {
+  test("two manager instances writing concurrently both keep their own task record", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    const mgrA = createTaskManager({
+      stateDir,
+      spawnFn: () => fakeChild(1001),
+      killFn: () => { throw new Error("not used"); },
+    });
+    const mgrB = createTaskManager({
+      stateDir,
+      spawnFn: () => fakeChild(1002),
+      killFn: () => { throw new Error("not used"); },
+    });
+    const a = mgrA.dispatch({ prompt: "from A", directory: os.tmpdir() });
+    const b = mgrB.dispatch({ prompt: "from B", directory: os.tmpdir() });
+
+    const onDisk = JSON.parse(fs.readFileSync(path.join(stateDir, "tasks.json"), "utf8"));
+    const ids = onDisk.map((t) => t.id);
+    assert.ok(ids.includes(a.id), "manager A's task must survive manager B's write");
+    assert.ok(ids.includes(b.id), "manager B's task must survive manager A's write");
+  });
+
+  test("malformed tasks.json surfaces as a structured error instead of throwing at construction", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    fs.writeFileSync(path.join(stateDir, "tasks.json"), "{ not valid json");
+    const mgr = createTaskManager({ stateDir, spawnFn: () => fakeChild(), killFn: () => {} });
+    assert.throws(
+      () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir() }),
+      /error: could not read persisted task state/
+    );
+  });
+});
+
 describe("dispatch() input validation (throws before spawning anything)", () => {
   test("rejects a missing prompt", () => {
     const mgr = makeManager();
