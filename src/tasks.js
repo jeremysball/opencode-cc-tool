@@ -548,11 +548,52 @@ export function createTaskManager({
     }
   }
 
+  // Distinguishes "opencode never wrote a byte" (still starting up, or stuck
+  // before its first event -- e.g. hung on a usage-limit retry) from "wrote
+  // bytes but no parseable event yet" from "at least one event landed". A
+  // caller polling taskferry_status on a task that's been "running" for a
+  // long time can use this to tell a genuinely stuck process apart from one
+  // that's just slow, without waiting out a full taskferry_wait timeout.
+  const LOG_ACTIVITY_SCAN_BYTES = 64 * 1024;
+  function logActivity(logPath) {
+    let stat;
+    try {
+      stat = fs.statSync(logPath);
+    } catch {
+      return { logBytesWritten: 0, logLastWriteAt: null, logHasEvent: false };
+    }
+    let hasEvent = false;
+    if (stat.size > 0) {
+      let fd;
+      try {
+        const bytes = Math.min(stat.size, LOG_ACTIVITY_SCAN_BYTES);
+        const buffer = Buffer.alloc(bytes);
+        fd = fs.openSync(logPath, "r");
+        fs.readSync(fd, buffer, 0, bytes, 0);
+        for (const line of buffer.toString("utf8").split("\n")) {
+          if (!line.trim()) continue;
+          try {
+            JSON.parse(line);
+            hasEvent = true;
+            break;
+          } catch {
+            continue;
+          }
+        }
+      } catch {
+        hasEvent = false;
+      } finally {
+        if (fd != null) fs.closeSync(fd);
+      }
+    }
+    return { logBytesWritten: stat.size, logLastWriteAt: stat.mtime.toISOString(), logHasEvent: hasEvent };
+  }
+
   function status(taskId) {
     ensureStateLoaded();
     const task = tasks.get(taskId);
     if (!task) throw noSuchTask(taskId);
-    return summarize(task);
+    return { ...summarize(task), ...logActivity(task.logPath) };
   }
 
   function wait(taskId, { timeoutMs = MAX_WAIT_MS, tailChars } = {}) {
