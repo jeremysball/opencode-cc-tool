@@ -42,10 +42,11 @@ follow-up call isn't obvious.
 
 ### `opencode_dispatch(prompt, directory, model?, variant?, session_id?)`
 
-Starts `opencode run --dir <directory> --auto --format json -- <prompt>` as
-a background child process, with stdout and stderr redirected to a private
-per-task log file. Returns a task summary immediately, including `id`,
-`status: "running"`, `pid`, and `logPath`.
+Queues `opencode run --dir <directory> --auto --format json -- <prompt>` for
+background execution, with stdout and stderr redirected to a private per-task
+log file. Returns a task summary immediately. The first two tasks in each
+rolling five-second window start immediately; later tasks return
+`status: "queued"` until a launch slot opens.
 
 - `directory` must be an absolute path that exists.
 - `model`: any valid `provider/model` string (run `opencode models` to list
@@ -60,6 +61,13 @@ per-task log file. Returns a task summary immediately, including `id`,
   <id>`) instead of starting fresh. Get session ids from a prior
   `opencode_result` or `opencode_status` response.
 
+#### Launch rate
+
+- `OPENCODE_CC_TOOL_MAX_DISPATCHES_PER_WINDOW`: maximum task launches per
+  rolling window. Defaults to `2`.
+- `OPENCODE_CC_TOOL_DISPATCH_WINDOW_MS`: rolling-window duration in
+  milliseconds. Defaults to `5000`.
+
 ### `opencode_wait(task_id, timeout_ms?, tail_chars?)`
 
 Blocks until the task's real `exit` event fires, or `timeout_ms` elapses
@@ -68,7 +76,7 @@ own 60s default MCP tool-call timeout), then returns the same status shape
 as `opencode_status`. This is the closest available analog to the built-in
 Agent tool's auto-resume behavior: call once, get blocked, get a result,
 instead of looping on `opencode_status` yourself. If it returns with
-`status: "running"`, the task simply outlived the cap; call it again. Pass
+`status: "queued"` or `"running"`, the task simply outlived the cap; call it again. Pass
 `tail_chars` to include the trailing parsed narration from a task that is
 still running after the timeout, plus its full character count and whether
 the tail was truncated.
@@ -85,13 +93,35 @@ from `"crashed"`.
 
 ### `opencode_status(task_id)`
 
-Returns `{ status: "running" | "done" | "crashed" | "cancelled" |
+Returns `{ status: "queued" | "running" | "done" | "crashed" | "cancelled" |
 "unknown", exitCode, signal, logPath, ... }`. `status` comes from the child
 process's actual exit event (`child.on("exit", ...)`), not from parsing
 output. `"unknown"` appears only if the server process restarted while the
 task was still running; see Limitations.
 
-### `opencode_result(task_id)`
+### `opencode_tail(task_id, chars?)`
+
+Returns the final `chars` Unicode code points of the newest parsed `text`
+event for a task. It reads the local task log only and never sends content to
+a model. `chars` defaults to 1000 and has a maximum of 65536. The response
+includes the complete event length and `truncated` so callers know whether the
+suffix omitted earlier content.
+
+### `opencode_summary(task_id, max_words?)`
+
+Captures a bounded snapshot of observed task narration and starts a separate
+summary task using `opencode-go/deepseek-v4-flash` by default. The summary is
+asynchronous: wait for the returned `summaryTask.id`, then call
+`opencode_result` on that ID.
+
+The snapshot is sent to the configured model provider. Do not summarize logs
+containing secrets you do not want to send to that provider. The summary child
+uses a private attachment, runs outside the source workspace, disables plugins,
+and denies every agent tool. Set `OPENCODE_CC_TOOL_SUMMARY_MODEL` to select an
+available replacement model. `max_words` is a target between 75 and 300 words;
+it defaults to 200.
+
+### `opencode_result(task_id, full?, fields?)`
 
 Once a task is `done` or `crashed`, parses its log (opencode's own
 `--format json` NDJSON event stream, one JSON object per line) into two
@@ -108,6 +138,11 @@ A single-step run (no tool calls) has `message === narration`. Also returns
 `sessionId`, `tokens`, and `cost` pulled from the `step_finish` events.
 Returns a polite "still running" message instead of a partial result if
 called too early.
+
+Pass `fields` to project only the data needed by the caller. For example,
+`fields: ["message"]` returns only `taskId`, `status`, and the final assistant
+turn. Omit `fields` for the complete backward-compatible result. `full: true`
+is valid only when the narration field is requested.
 
 Naively joining every `text` event regardless of step (an earlier version
 of this tool did exactly that) glues "I'm about to run `ls`" directly onto
@@ -180,13 +215,13 @@ research-preview feature.
 
 ## Limitations and follow-ups
 
-- **State survives only for the current server process's lifetime.** If the
+- **Queued and running state survive only for the current server process's lifetime.** If the
   MCP server process restarts while a task is still running, the new
   process has no child-process handle to listen for that task's `exit`
   event (that handle exists only in the process that called `spawn`). On
-  reload, the server relabels any task still marked `"running"` in
-  `tasks.json` as `"unknown"` instead of reporting a possibly-stale
-  `"running"`. The underlying `opencode` process, if still alive, keeps
+  reload, the server relabels any task still marked `"queued"` or `"running"`
+  in `tasks.json` as `"unknown"` instead of reporting a possibly-stale state.
+  The underlying `opencode` process, if still alive, keeps
   running and writing its log: inspect the
   log file directly, or run `opencode session list`, but this server won't
   re-attach a status watcher to it. A follow-up could periodically recheck

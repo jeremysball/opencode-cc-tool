@@ -13,7 +13,7 @@ import { createTaskManager } from "./tasks.js";
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -28,6 +28,10 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn } = {}) {
     stateDir,
     spawnFn: spawnFn ?? (() => { throw new Error("spawnFn was not injected for this test"); }),
     killFn: killFn ?? (() => { throw new Error("killFn was not injected for this test"); }),
+    listModelsFn: listModelsFn ?? (() => "opencode-go/deepseek-v4-flash\n"),
+    verifySummaryAgentFn: verifySummaryAgentFn ?? (async () => {}),
+    ...(maxDispatchesPerWindow != null ? { maxDispatchesPerWindow } : {}),
+    ...(dispatchWindowMs != null ? { dispatchWindowMs } : {}),
   });
 }
 
@@ -198,6 +202,68 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
   });
 });
 
+describe("dispatch queue", () => {
+  test("launches at most two tasks per window and starts queued tasks FIFO", async () => {
+    const children = [];
+    const mgr = makeManager({
+      maxDispatchesPerWindow: 2,
+      dispatchWindowMs: 20,
+      spawnFn: () => {
+        const child = fakeChild(1000 + children.length);
+        children.push(child);
+        return child;
+      },
+    });
+
+    const first = mgr.dispatch({ prompt: "first", directory: os.tmpdir() });
+    const second = mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
+    const third = mgr.dispatch({ prompt: "third", directory: os.tmpdir() });
+
+    assert.equal(first.status, "running");
+    assert.equal(second.status, "running");
+    assert.equal(third.status, "queued");
+    assert.equal(children.length, 2);
+
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    assert.equal(mgr.status(third.id).status, "running");
+    assert.equal(children.length, 3);
+  });
+
+  test("cancels a queued task without spawning or signaling it", () => {
+    const killCalls = [];
+    const mgr = makeManager({
+      maxDispatchesPerWindow: 1,
+      dispatchWindowMs: 60000,
+      spawnFn: () => fakeChild(),
+      killFn: (pid, signal) => killCalls.push({ pid, signal }),
+    });
+
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir() });
+    const queued = mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
+    const cancelled = mgr.cancel(queued.id);
+
+    assert.equal(cancelled.status, "cancelled");
+    assert.match(cancelled.note, /cancelled before launch/);
+    assert.deepEqual(killCalls, []);
+  });
+
+  test("waits for a queued task to settle instead of returning immediately", async () => {
+    const mgr = makeManager({
+      maxDispatchesPerWindow: 1,
+      dispatchWindowMs: 60000,
+      spawnFn: () => fakeChild(),
+    });
+
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir() });
+    const queued = mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
+    const waiting = mgr.wait(queued.id, { timeoutMs: 100 });
+    mgr.cancel(queued.id);
+
+    assert.equal((await waiting).status, "cancelled");
+  });
+});
+
 describe("cancel()", () => {
   test("sends SIGTERM to the negative pid (process group), then escalates to SIGKILL after graceMs if still running", async () => {
     const child = fakeChild(777);
@@ -256,6 +322,11 @@ describe("cancel()", () => {
     assert.equal(mgr.status("t1").status, "unknown");
     const result = mgr.cancel("t1");
     assert.match(result.note, /task is already unknown; nothing to cancel/);
+  });
+
+  test("a persisted queued task reloads as 'unknown' and is never launched", () => {
+    const mgr = makeManager({ tasksFixture: [baseTask({ id: "t1", status: "queued", pid: null })] });
+    assert.equal(mgr.status("t1").status, "unknown");
   });
 });
 
@@ -335,7 +406,7 @@ describe("list()", () => {
   test("empty state is explicit, not an empty array", () => {
     const mgr = makeManager();
     const l = mgr.list();
-    assert.deepEqual(l.counts, { running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 });
+    assert.deepEqual(l.counts, { queued: 0, running: 0, done: 0, crashed: 0, cancelled: 0, unknown: 0 });
     assert.equal(l.tasks, "none found (this server process's lifetime)");
   });
 
@@ -348,7 +419,7 @@ describe("list()", () => {
         baseTask({ id: "t4", status: "running" }), // becomes "unknown" on load
       ],
     });
-    assert.deepEqual(mgr.list().counts, { running: 0, done: 1, crashed: 1, cancelled: 1, unknown: 1 });
+    assert.deepEqual(mgr.list().counts, { queued: 0, running: 0, done: 1, crashed: 1, cancelled: 1, unknown: 1 });
   });
 
   test("rows use the minimal 4-field schema, not the full detail object", () => {
@@ -457,5 +528,175 @@ describe("result()", () => {
     const r = mgr.result(dispatched.id);
     assert.equal(r.status, "running");
     assert.match(r.message, /still running/);
+  });
+
+  test("projects only requested fields while retaining the task envelope", () => {
+    const log = [
+      JSON.stringify({ type: "text", part: { messageID: "m1", text: "Final answer" } }),
+      JSON.stringify({ type: "step_finish", part: { messageID: "m1", reason: "stop" } }),
+    ].join("\n");
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "t1", logPath: path.join(logDir, "t1.ndjson") })],
+      logs: { "t1.ndjson": log },
+    });
+    assert.deepEqual(mgr.result("t1", { fields: ["message"] }), {
+      taskId: "t1",
+      status: "done",
+      message: "Final answer",
+    });
+  });
+
+  test("rejects a full narration request that omits narration from fields", () => {
+    const mgr = makeManager({ tasksFixture: [baseTask({ id: "t1" })] });
+    assert.throws(() => mgr.result("t1", { full: true, fields: ["message"] }), /full requires narration/);
+  });
+
+  test("returns null for selected fields unavailable on a running task", () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const task = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    assert.deepEqual(mgr.result(task.id, { fields: ["tokens"] }), {
+      taskId: task.id,
+      status: "running",
+      tokens: null,
+    });
+  });
+
+  test("does not expose partial output from an unknown summary task", () => {
+    const mgr = makeManager({
+      tasksFixture: [baseTask({ id: "t1", status: "running", summaryOf: { sourceTaskId: "source" } })],
+    });
+    const r = mgr.result("t1", { fields: ["message"] });
+    assert.equal(r.status, "unknown");
+    assert.match(r.message, /partial output is unavailable/);
+  });
+});
+
+describe("tail()", () => {
+  test("returns a Unicode-safe suffix of the latest text event", () => {
+    const log = [
+      JSON.stringify({ type: "text", part: { messageID: "m1", text: "older" } }),
+      JSON.stringify({ type: "text", part: { messageID: "m2", text: "alpha😀beta" } }),
+    ].join("\n");
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "t1", logPath: path.join(logDir, "t1.ndjson") })],
+      logs: { "t1.ndjson": log },
+    });
+    assert.deepEqual(mgr.tail("t1", { chars: 5 }), {
+      taskId: "t1",
+      status: "done",
+      text: "😀beta",
+      textTotalChars: 10,
+      truncated: true,
+    });
+  });
+
+  test("returns a definitive no-text response", () => {
+    const mgr = makeManager({ tasksFixture: [baseTask({ id: "t1" })] });
+    const r = mgr.tail("t1");
+    assert.equal(r.text, "none observed yet");
+    assert.equal(r.textTotalChars, 0);
+    assert.equal(r.truncated, false);
+  });
+
+  test("validates the requested suffix length", () => {
+    const mgr = makeManager({ tasksFixture: [baseTask({ id: "t1" })] });
+    assert.throws(() => mgr.tail("t1", { chars: 0 }), /chars must be a positive integer/);
+  });
+});
+
+describe("summarize()", () => {
+  test("uses an isolated tool-denied agent and private attachment", async () => {
+    let captured;
+    let verifiedEnv;
+    const child = fakeChild();
+    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Investigated the issue" } });
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": log },
+      spawnFn: (command, args, options) => {
+        captured = { command, args, options };
+        return child;
+      },
+      verifySummaryAgentFn: async (env) => { verifiedEnv = env; },
+    });
+
+    const summary = await mgr.summarize("source", { maxWords: 150 });
+    assert.equal(captured.command, "opencode");
+    assert.ok(captured.args.includes("--pure"));
+    assert.ok(captured.args.includes("--agent"));
+    assert.equal(captured.args.includes("--auto"), false);
+    const attachment = captured.args[captured.args.indexOf("-f") + 1];
+    assert.equal(fs.statSync(attachment).mode & 0o777, 0o600);
+    assert.equal(captured.options.cwd, mgr.paths.SUMMARY_DIR);
+    assert.match(captured.options.env.OPENCODE_CONFIG_CONTENT, /"\*":"deny"/);
+    assert.equal(verifiedEnv.OPENCODE_CONFIG_CONTENT, captured.options.env.OPENCODE_CONFIG_CONTENT);
+    assert.equal(summary.summaryTask.status, "running");
+
+    child.emit("exit", 0, null);
+    assert.equal(fs.existsSync(attachment), false);
+  });
+
+  test("does not spend a model call when no text has been observed", async () => {
+    let spawned = false;
+    const mgr = makeManager({
+      tasksFixture: [baseTask({ id: "source" })],
+      spawnFn: () => { spawned = true; return fakeChild(); },
+    });
+    const result = await mgr.summarize("source");
+    assert.equal(result.summary, "no model text observed yet");
+    assert.equal(spawned, false);
+  });
+
+  test("rejects an unavailable configured summary model before creating a task", async () => {
+    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "progress" } });
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": log },
+      listModelsFn: () => "openai/gpt-5.6-luna\n",
+    });
+    await assert.rejects(mgr.summarize("source"), /summary model is unavailable/);
+    assert.equal(mgr.list().tasks.length, 1);
+  });
+
+  test("does not launch when the effective summary agent isolation check fails", async () => {
+    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "progress" } });
+    let spawned = false;
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": log },
+      spawnFn: () => { spawned = true; return fakeChild(); },
+      verifySummaryAgentFn: async () => { throw new Error("bash is enabled"); },
+    });
+    await assert.rejects(mgr.summarize("source"), /summary agent isolation check failed/);
+    assert.equal(spawned, false);
+    assert.equal(mgr.list().tasks.length, 1);
+  });
+
+  test("preserves head and tail narration around an oversized log omission marker", async () => {
+    const child = fakeChild();
+    let attachment;
+    const events = [
+      JSON.stringify({ type: "text", part: { messageID: "head", text: "HEAD_MARKER" } }),
+      ...Array.from({ length: 160 }, (_, index) => JSON.stringify({
+        type: "text",
+        part: { messageID: `middle-${index}`, text: "x".repeat(700) },
+      })),
+      JSON.stringify({ type: "text", part: { messageID: "tail", text: "TAIL_MARKER" } }),
+    ].join("\n");
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": events },
+      spawnFn: (_command, args) => {
+        attachment = args[args.indexOf("-f") + 1];
+        return child;
+      },
+    });
+    await mgr.summarize("source");
+    const snapshot = JSON.parse(fs.readFileSync(attachment, "utf8"));
+    assert.match(snapshot.narration, /HEAD_MARKER/);
+    assert.match(snapshot.narration, /TAIL_MARKER/);
+    assert.match(snapshot.narration, /bytes omitted from source log/);
+    child.emit("exit", 0, null);
   });
 });
