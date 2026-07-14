@@ -664,7 +664,12 @@ export function createTaskManager({
       throw new Error("error: model is required\nhelp: taskferry_advisor requires a provider/model string, e.g. \"openai/gpt-5.6-sol\"");
     }
     const resolved = resolveAdvisorSession(session_id);
-    const dispatched = dispatch({ prompt, directory, model, variant, sessionId: resolved.sessionId });
+    let dispatched;
+    try {
+      dispatched = dispatch({ prompt, directory, model, variant, sessionId: resolved.sessionId });
+    } catch (err) {
+      throw new Error(err.message.replaceAll("taskferry_dispatch", "taskferry_advisor"));
+    }
     const settled = await poll(dispatched.id, timeout_ms != null ? { timeoutMs: timeout_ms } : {});
 
     const resetFields = resolved.reset ? { previous_session_id: resolved.previousSessionId } : {};
@@ -678,7 +683,9 @@ export function createTaskManager({
         session_id: logSessionId ?? null,
         session_reset: resolved.reset,
         ...resetFields,
-        note: `still running — call taskferry_poll or taskferry_advisor again with session_id "${logSessionId ?? dispatched.id}" to continue`,
+        note: logSessionId
+          ? `still running; call taskferry_poll or taskferry_advisor again with session_id "${logSessionId}" to continue`
+          : `still running; call taskferry_poll with task_id "${dispatched.id}" to continue (no session_id yet)`,
       };
     }
 

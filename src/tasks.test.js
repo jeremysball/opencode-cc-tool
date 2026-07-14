@@ -533,6 +533,37 @@ describe("advisor()", () => {
     assert.match(advised.note, /taskferry_poll or taskferry_advisor again with session_id/);
   });
 
+  test("when the timeout elapses before opencode has written a session id, the note points at taskferry_poll with task_id instead of fabricating a session_id", async () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+
+    const advisorPromise = mgr.advisor({
+      prompt: "long question",
+      directory: os.tmpdir(),
+      model: "openai/gpt-5.6-sol",
+      timeout_ms: 20,
+    });
+    // No log file written at all -- opencode hasn't emitted a session id yet.
+
+    const advised = await advisorPromise;
+    assert.equal(advised.status, "running");
+    assert.equal(advised.session_id, null);
+    assert.match(advised.note, /taskferry_poll with task_id/);
+    assert.equal(advised.note.includes('session_id ""'), false);
+  });
+
+  test("a dispatch validation error is reported under taskferry_advisor, not taskferry_dispatch", async () => {
+    const mgr = makeManager();
+    await assert.rejects(
+      () => mgr.advisor({ prompt: "", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" }),
+      (err) => {
+        assert.match(err.message, /taskferry_advisor requires a non-empty prompt string/);
+        assert.equal(err.message.includes("taskferry_dispatch"), false);
+        return true;
+      }
+    );
+  });
+
   test("a fresh session_id within the TTL is passed through to dispatch (--continue --session)", async () => {
     const child = fakeChild();
     let captured = null;

@@ -101,15 +101,15 @@ server.registerTool(
   {
     title: "Ask a bigger model for help, blocking",
     description:
-      "Consult a different model mid-task and block until it answers — the same dispatch+poll+result machinery as taskferry_dispatch, glued into one call so the answer comes back inline instead of requiring a separate poll. Use this the way a weaker model consults a stronger one for planning or hard debugging help, not for open-ended background work (use taskferry_dispatch for that). Capped at 45s like taskferry_poll; if it times out, the response includes status: \"running\" plus a task_id and session_id — call taskferry_poll or taskferry_advisor again with that session_id to continue. Pass session_id to continue a prior advisor exchange; if that session has gone stale (idle past the configured TTL) or is unrecognized, a fresh session starts automatically and the response's session_reset is true with previous_session_id set, rather than erroring — never keep piling onto a conversation that's lost cache recency.",
+      "Consult a different model mid-task and block until it answers; the same dispatch+poll+result machinery as taskferry_dispatch, glued into one call so the answer comes back inline instead of requiring a separate poll. Use this the way a weaker model consults a stronger one for planning or hard debugging help, not for open-ended background work (use taskferry_dispatch for that). Capped at 45s like taskferry_poll; if it times out, the response includes status: \"running\" plus a task_id and session_id; call taskferry_poll or taskferry_advisor again with that session_id to continue. Pass session_id to continue a prior advisor exchange; if that session has gone stale (idle past the configured TTL) or is unrecognized, a fresh session starts automatically and the response's session_reset is true with previous_session_id set, rather than erroring; never keep piling onto a conversation that's lost cache recency.",
     inputSchema: {
-      prompt: z.string().describe("Self-contained question/context for the advisor — taskferry has no access to the caller's own conversation, so include whatever context the advisor needs."),
+      prompt: z.string().describe("Self-contained question/context for the advisor; taskferry has no access to the caller's own conversation, so include whatever context the advisor needs."),
       directory: z
         .string()
         .describe("Absolute path to the working directory opencode should run in (--dir)."),
       model: z
         .string()
-        .describe("provider/model string for the advisor, e.g. 'openai/gpt-5.6-sol' or 'zai/glm-5.2'. Required — unlike taskferry_dispatch, there is no default advisor model."),
+        .describe("provider/model string for the advisor, e.g. 'openai/gpt-5.6-sol' or 'zai/glm-5.2'. Required; unlike taskferry_dispatch, there is no default advisor model."),
       variant: z
         .string()
         .optional()
@@ -117,7 +117,7 @@ server.registerTool(
       session_id: z
         .string()
         .optional()
-        .describe("Continue a prior advisor exchange. Silently starts a fresh session instead of erroring if this session has expired or is unrecognized — check session_reset in the response."),
+        .describe("Continue a prior advisor exchange. Silently starts a fresh session instead of erroring if this session has expired or is unrecognized; check session_reset in the response."),
       timeout_ms: z
         .number()
         .optional()

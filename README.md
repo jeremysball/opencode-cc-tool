@@ -86,19 +86,19 @@ the tail was truncated.
 A blocking "ask a bigger model" call: dispatches like `taskferry_dispatch`,
 then polls internally and returns the answer inline instead of requiring a
 separate `taskferry_poll` round-trip. Use it the way a weaker model consults
-a stronger one for planning or hard-debugging help mid-task — not for
+a stronger one for planning or hard-debugging help mid-task, not for
 open-ended background work (use `taskferry_dispatch` for that).
 
-- `model` is required, with no default (unlike `taskferry_dispatch`) — the
+- `model` is required, with no default (unlike `taskferry_dispatch`); the
   caller picks the advisor.
 - Capped at 45000ms like `taskferry_poll`. If it times out before the
   advisor answers, the response is `status: "running"` plus `task_id` and
-  `session_id` — call `taskferry_poll` or `taskferry_advisor` again (with
+  `session_id`; call `taskferry_poll` or `taskferry_advisor` again (with
   that `session_id`) to continue.
 - `session_id` resumes a prior advisor exchange. If that session has gone
   idle past `TASKFERRY_ADVISOR_SESSION_TTL_MS` (default 30 minutes) or is
   unrecognized (e.g. a typo, or from before a server restart), a fresh
-  session starts automatically instead of erroring — the response's
+  session starts automatically instead of erroring; the response's
   `session_reset` is `true` and `previous_session_id` holds the id that
   wasn't reused. This avoids ever silently resuming a conversation whose
   prompt cache has gone cold.
