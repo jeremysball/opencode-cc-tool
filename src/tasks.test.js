@@ -13,7 +13,7 @@ import { createTaskManager } from "./tasks.js";
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, watchdogPollMs } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -34,6 +34,8 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     ...(dispatchWindowMs != null ? { dispatchWindowMs } : {}),
     ...(advisorSessionTtlMs != null ? { advisorSessionTtlMs } : {}),
     ...(maxConcurrentTasks != null ? { maxConcurrentTasks } : {}),
+    ...(noOutputTimeoutMs != null ? { noOutputTimeoutMs } : {}),
+    ...(watchdogPollMs != null ? { watchdogPollMs } : {}),
   });
 }
 
@@ -358,6 +360,48 @@ describe("active-task concurrency cap (regressions)", () => {
     // running child promotes the last queued task and clears the retry
     // timer that launchQueuedTasks scheduled to wait for a slot to free.
     children[1].emit("exit", 0, null);
+  });
+});
+
+describe("no-output watchdog", () => {
+  test("a running child with no parseable log event past the deadline is stopped and marked crashed with failureReason", async () => {
+    const child = fakeChild(7001);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 20,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    await new Promise((r) => setTimeout(r, 60));
+    assert.ok(killed.some((k) => k.signal === "SIGTERM"), "watchdog must SIGTERM the stuck child's process group");
+
+    child.emit("exit", null, "SIGTERM");
+    const s = mgr.status(dispatched.id);
+    assert.equal(s.status, "crashed");
+    assert.equal(s.failureReason, "no_output_timeout");
+  });
+
+  test("a running child that writes a parseable log event before the deadline is left alone", async () => {
+    const child = fakeChild(7002);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 30,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(mgr.status(dispatched.id).logPath, JSON.stringify({ type: "text", part: { messageID: "m1", text: "working..." } }) + "\n");
+
+    await new Promise((r) => setTimeout(r, 60));
+    assert.deepEqual(killed, []);
+    assert.equal(mgr.status(dispatched.id).status, "running");
+
+    child.emit("exit", 0, null);
+    assert.equal(mgr.status(dispatched.id).failureReason, null);
   });
 });
 

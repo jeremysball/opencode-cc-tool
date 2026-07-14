@@ -188,6 +188,15 @@ const DEFAULT_ADVISOR_SESSION_TTL_MS = positiveInteger(
   Number(process.env.TASKFERRY_ADVISOR_SESSION_TTL_MS),
   30 * 60 * 1000
 );
+const DEFAULT_NO_OUTPUT_TIMEOUT_MS = positiveInteger(
+  Number(process.env.TASKFERRY_NO_OUTPUT_TIMEOUT_MS),
+  120000
+);
+const DEFAULT_WATCHDOG_POLL_MS = positiveInteger(
+  Number(process.env.TASKFERRY_WATCHDOG_POLL_MS),
+  2000
+);
+const WATCHDOG_KILL_GRACE_MS = 5000;
 
 /**
  * @param {object} [options]
@@ -224,6 +233,8 @@ export function createTaskManager({
   dispatchWindowMs = DEFAULT_DISPATCH_WINDOW_MS,
   maxConcurrentTasks = DEFAULT_MAX_CONCURRENT_TASKS,
   advisorSessionTtlMs = DEFAULT_ADVISOR_SESSION_TTL_MS,
+  noOutputTimeoutMs = DEFAULT_NO_OUTPUT_TIMEOUT_MS,
+  watchdogPollMs = DEFAULT_WATCHDOG_POLL_MS,
 } = {}) {
   const LOG_DIR = path.join(stateDir, "logs");
   const SUMMARY_DIR = path.join(stateDir, "summaries");
@@ -233,6 +244,8 @@ export function createTaskManager({
   const dispatchWindow = positiveInteger(dispatchWindowMs, DEFAULT_DISPATCH_WINDOW_MS);
   const concurrencyLimit = positiveInteger(maxConcurrentTasks, DEFAULT_MAX_CONCURRENT_TASKS);
   const advisorTtl = positiveInteger(advisorSessionTtlMs, DEFAULT_ADVISOR_SESSION_TTL_MS);
+  const noOutputTimeout = positiveInteger(noOutputTimeoutMs, DEFAULT_NO_OUTPUT_TIMEOUT_MS);
+  const watchdogPoll = positiveInteger(watchdogPollMs, DEFAULT_WATCHDOG_POLL_MS);
   for (const dir of [stateDir, LOG_DIR, SUMMARY_DIR]) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     fs.chmodSync(dir, 0o700);
@@ -254,6 +267,12 @@ export function createTaskManager({
   // persist(), and a Timeout isn't serializable data.
   /** @type {Map<string, NodeJS.Timeout>} */
   const escalationTimers = new Map();
+
+  // No-output watchdog tickers, keyed by task id. Each one polls the task's
+  // log file on a fixed interval; if no parseable event has landed by the
+  // configured deadline, failRunningTask() escalates the child. Same
+  // "not in the task object" reason as escalationTimers.
+  const runningWatchers = new Map();
 
   // Pending taskferry_poll callbacks, keyed by task id. Lets a single MCP tool
   // call block until the child's exit event fires (or a timeout elapses)
@@ -352,9 +371,10 @@ export function createTaskManager({
    * @returns {TaskSummary}
    */
   function summarize(task) {
-    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested } = task;
+    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, failureReason } = task;
     return {
       id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath,
+      failureReason: failureReason ?? null,
       promptPreview,
       ...(promptTotalChars != null ? { promptTotalChars } : {}),
       ...(task.summaryOf ? { summaryOf: task.summaryOf } : {}),
@@ -446,6 +466,7 @@ export function createTaskManager({
       promptTotalChars: prompt.length > 200 ? prompt.length : null,
       spawnError: null,
       cancelRequested: false,
+      failureReason: null,
     };
     tasks.set(id, task);
     persistTask(task.id);
@@ -608,6 +629,7 @@ export function createTaskManager({
       promptTotalChars: null,
       spawnError: null,
       cancelRequested: false,
+      failureReason: null,
       summaryOf,
     };
     tasks.set(id, task);
@@ -698,8 +720,10 @@ export function createTaskManager({
       task.pid = /** @type {number} */ (child.pid);
       runningCount++;
       persistTask(task.id);
+      startRunningWatcher(task);
 
       child.on("exit", (code, signal) => {
+        stopRunningWatcher(task.id);
         if (settled) return;
         settled = true;
         const timer = escalationTimers.get(task.id);
@@ -721,6 +745,7 @@ export function createTaskManager({
       });
 
       child.on("error", (err) => {
+        stopRunningWatcher(task.id);
         if (settled) return;
         settled = true;
         task.status = "crashed";
@@ -796,6 +821,54 @@ export function createTaskManager({
     escalationTimers.set(taskId, timer);
 
     return { ...summarize(task), note: `SIGTERM sent to process group ${task.pid}; escalates to SIGKILL after ${graceMs}ms if it hasn't exited` };
+  }
+
+  function stopRunningWatcher(taskId) {
+    const timer = runningWatchers.get(taskId);
+    if (timer) {
+      clearInterval(timer);
+      runningWatchers.delete(taskId);
+    }
+  }
+
+  // Forces a running task to stop for a reason other than user cancellation
+  // (watchdog timeout, or provider-exhaustion detection added in Task 6).
+  // Mirrors cancel()'s SIGTERM-then-SIGKILL escalation, but records
+  // failureReason instead of cancelRequested so the exit handler's status
+  // computation (unchanged) still lands on "crashed", distinguishable from a
+  // user-requested "cancelled".
+  function failRunningTask(task, failureReason) {
+    if (task.failureReason) return; // already stopping this task
+    task.failureReason = failureReason;
+    stopRunningWatcher(task.id);
+    sendSignal(task.pid, "SIGTERM");
+    const timer = setTimeout(() => {
+      escalationTimers.delete(task.id);
+      if (tasks.get(task.id)?.status === "running") sendSignal(task.pid, "SIGKILL");
+    }, WATCHDOG_KILL_GRACE_MS);
+    escalationTimers.set(task.id, timer);
+  }
+
+  function startRunningWatcher(task) {
+    const startedAtMs = Date.now();
+    const timer = setInterval(() => {
+      const current = tasks.get(task.id);
+      if (!current || current.status !== "running") {
+        stopRunningWatcher(task.id);
+        return;
+      }
+      if (!logActivity(current.logPath).logHasEvent && Date.now() - startedAtMs >= noOutputTimeout) {
+        failRunningTask(current, "no_output_timeout");
+      }
+    }, watchdogPoll);
+    // Same as child.unref() in startTask: the watchdog is a background
+    // observer, not something that should pin the server's event loop alive.
+    // An unref'd interval still fires while the loop is otherwise busy, but
+    // lets the process exit if nothing else (real work, child subprocesses,
+    // waiters) is keeping it alive -- e.g. tests that cancel a task without
+    // firing an 'exit' event.
+    timer.unref();
+    runningWatchers.set(task.id, timer);
   }
 
   // Targets the process group (negative pid), which reaches opencode and any
