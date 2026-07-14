@@ -321,6 +321,46 @@ describe("active-task concurrency cap (independent of the launch-rate window)", 
   });
 });
 
+describe("active-task concurrency cap (regressions)", () => {
+  test("a child that fires both 'error' and 'exit' only decrements runningCount once (no over-promotion of the queue)", () => {
+    // Dispatch concurrencyLimit + 2 so 2 tasks are initially queued. If the
+    // exit/error handlers double-settle (no `settled` guard), runningCount
+    // drops by 2 and launchQueuedTasks() runs twice in a row, promoting
+    // BOTH queued tasks. With the guard, only the first promotion happens
+    // and one task remains queued.
+    const children = [];
+    const mgr = makeManager({
+      spawnFn: () => {
+        const c = fakeChild(9100 + children.length);
+        children.push(c);
+        return c;
+      },
+      maxConcurrentTasks: 4,
+      maxDispatchesPerWindow: 10,
+      dispatchWindowMs: 60000,
+    });
+    const dispatched = Array.from({ length: 6 }, (_, i) => mgr.dispatch({ prompt: `p${i}`, directory: os.tmpdir() }));
+    const statusOf = (id) => mgr.status(id).status;
+    assert.equal(dispatched.filter((d) => statusOf(d.id) === "queued").length, 2);
+
+    // Double-settle children[0] synchronously: emit error first, then exit.
+    children[0].emit("error", new Error("spawn opencode ENOENT"));
+    children[0].emit("exit", 1, null);
+
+    // children[0] settled to "crashed" once (the error wins), and exactly ONE
+    // queued task was promoted to "running". The other still sits in
+    // "queued" -- the duplicate exit event did not free a second slot.
+    assert.equal(statusOf(dispatched[0].id), "crashed");
+    assert.equal(dispatched.filter((d) => statusOf(d.id) === "running").length, 4);
+    assert.equal(dispatched.filter((d) => statusOf(d.id) === "queued").length, 1);
+
+    // Drain the queue so the test process can exit: finishing any other
+    // running child promotes the last queued task and clears the retry
+    // timer that launchQueuedTasks scheduled to wait for a slot to free.
+    children[1].emit("exit", 0, null);
+  });
+});
+
 describe("cancel()", () => {
   test("sends SIGTERM to the negative pid (process group), then escalates to SIGKILL after graceMs if still running", async () => {
     const child = fakeChild(777);

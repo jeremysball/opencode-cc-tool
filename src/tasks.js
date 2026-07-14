@@ -627,7 +627,10 @@ export function createTaskManager({
   }
 
   function launchQueuedTasks() {
-    launchTimer = null;
+    if (launchTimer) {
+      clearTimeout(launchTimer);
+      launchTimer = null;
+    }
     const now = Date.now();
     while (launchTimes.length && launchTimes[0] <= now - dispatchWindow) launchTimes.shift();
 
@@ -690,12 +693,15 @@ export function createTaskManager({
       });
       fs.closeSync(logFd);
       logFd = null;
+      let settled = false;
       task.status = "running";
       task.pid = /** @type {number} */ (child.pid);
       runningCount++;
       persistTask(task.id);
 
       child.on("exit", (code, signal) => {
+        if (settled) return;
+        settled = true;
         const timer = escalationTimers.get(task.id);
         if (timer) {
           clearTimeout(timer);
@@ -715,6 +721,8 @@ export function createTaskManager({
       });
 
       child.on("error", (err) => {
+        if (settled) return;
+        settled = true;
         task.status = "crashed";
         task.spawnError = errMessage(err);
         task.endedAt = new Date().toISOString();
