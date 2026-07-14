@@ -101,7 +101,7 @@ server.registerTool(
   {
     title: "Check taskferry task status",
     description:
-      "Return structured status for a dispatched task: queued | running | done | crashed | cancelled | unknown, plus exit code and log path once finished. Backed by the child process's real exit event, not log string-matching.",
+      "Return structured status for a dispatched task: queued | running | done | crashed | cancelled | unknown, plus exit code and log path once finished. Backed by the child process's real exit event, not log string-matching. Also reports logBytesWritten, logLastWriteAt, and logHasEvent so a task stuck at 'running' with no log activity (e.g. hung on a usage-limit retry) can be told apart from one that's actively producing output.",
     inputSchema: {
       task_id: z.string().describe("Task id returned by taskferry_dispatch."),
     },

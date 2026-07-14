@@ -355,6 +355,40 @@ describe("unknown task_id (status/cancel/wait/result share one error path)", () 
   });
 });
 
+describe("status() log activity (tells a stuck-before-first-event task apart from an active one)", () => {
+  test("reports zero bytes and no event when the log file doesn't exist yet (e.g. still queued)", () => {
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "t1", status: "running", logPath: path.join(logDir, "missing.ndjson") })],
+    });
+    const s = mgr.status("t1");
+    assert.equal(s.logBytesWritten, 0);
+    assert.equal(s.logLastWriteAt, null);
+    assert.equal(s.logHasEvent, false);
+  });
+
+  test("reports nonzero bytes but no event when the log has been created but holds no parseable JSON line", () => {
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "t1", status: "running", logPath: path.join(logDir, "t1.ndjson") })],
+      logs: { "t1.ndjson": "not json\n" },
+    });
+    const s = mgr.status("t1");
+    assert.ok(s.logBytesWritten > 0);
+    assert.ok(s.logLastWriteAt);
+    assert.equal(s.logHasEvent, false);
+  });
+
+  test("reports logHasEvent: true once at least one line parses as JSON", () => {
+    const log = JSON.stringify({ type: "session", sessionID: "ses_1" });
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "t1", status: "running", logPath: path.join(logDir, "t1.ndjson") })],
+      logs: { "t1.ndjson": log },
+    });
+    const s = mgr.status("t1");
+    assert.ok(s.logBytesWritten > 0);
+    assert.equal(s.logHasEvent, true);
+  });
+});
+
 describe("wait()", () => {
   test("resolves immediately for a non-running task", async () => {
     const mgr = makeManager({ tasksFixture: [baseTask({ id: "t1", status: "crashed", exitCode: 1 })] });
