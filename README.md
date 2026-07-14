@@ -261,6 +261,32 @@ claude mcp list
 claude mcp get taskferry
 ```
 
+## Migrating from `opencode-cc-tool`
+
+If you previously registered this server as `opencode-cc-tool`, remove the
+old entry first (it pins the old tool names, which the renamed server no
+longer exposes), then add the new one:
+
+```bash
+claude mcp remove opencode-cc-tool
+claude mcp add taskferry -- node /path/to/taskferry/src/server.js
+```
+
+To carry over existing task state from the old default location
+(`~/.opencode-cc-tool/tasks.json`) to the new one
+(`$XDG_STATE_HOME/taskferry/tasks.json`, or
+`~/.local/state/taskferry/tasks.json` when `XDG_STATE_HOME` is unset):
+
+```bash
+mkdir -p "${XDG_STATE_HOME:-$HOME/.local/state}/taskferry"
+mv ~/.opencode-cc-tool/tasks.json "${XDG_STATE_HOME:-$HOME/.local/state}/taskferry/tasks.json"
+mv ~/.opencode-cc-tool/logs        "${XDG_STATE_HOME:-$HOME/.local/state}/taskferry/logs"
+```
+
+The env var prefix also changed: `OPENCODE_CC_TOOL_STATE_DIR` is now
+`TASKFERRY_STATE_DIR`. Update any `-e` flags in your `claude mcp add` line
+accordingly.
+
 ## Testing
 
 Two layers, deliberately kept separate: unit tests never touch a real
@@ -272,8 +298,8 @@ Two layers, deliberately kept separate: unit tests never touch a real
 npm test
 ```
 
-33 tests in `src/tasks.test.js`, using Node's built-in `node:test` (no test
-framework dependency), covering `src/tasks.js`'s task-lifecycle logic:
+53 tests across `src/tasks.test.js` and `src/server.test.js`, using Node's built-in
+`node:test` (no test framework dependency), covering `src/tasks.js`'s task-lifecycle logic
 input validation, the `error:`/`help:` message format shared by every
 lookup function, `list()`'s counts and empty state, `result()`'s
 message/narration parsing and 2000-char truncation, and the full
