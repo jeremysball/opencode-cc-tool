@@ -126,6 +126,19 @@ const SUMMARY_PREFLIGHT_TIMEOUT_MS = 10000;
 const RESULT_FIELDS = new Set(["message", "narration", "tokens", "cost", "sessionId", "exitCode", "signal", "spawnError", "logPath"]);
 const execFileAsync = promisify(execFile);
 
+const PROVIDER_EXHAUSTION_PATTERNS = [
+  /rate.?limit/i,
+  /\bquota\b/i,
+  /usage.?limit/i,
+  /too many requests/i,
+  /\b429\b/i,
+  /insufficient_quota/i,
+];
+
+function detectProviderExhaustion(rawLogText) {
+  return PROVIDER_EXHAUSTION_PATTERNS.some((pattern) => pattern.test(rawLogText));
+}
+
 const SUMMARY_AGENT_CONFIG = JSON.stringify({
   agent: {
     [SUMMARY_AGENT]: {
@@ -857,7 +870,17 @@ export function createTaskManager({
         stopRunningWatcher(task.id);
         return;
       }
-      if (!logActivity(current.logPath).logHasEvent && Date.now() - startedAtMs >= noOutputTimeout) {
+      let raw = "";
+      try {
+        raw = fs.readFileSync(current.logPath, "utf8");
+      } catch {
+        raw = "";
+      }
+      if (raw && detectProviderExhaustion(raw)) {
+        failRunningTask(current, "provider_usage_exhausted");
+        return;
+      }
+      if (!raw.trim() && Date.now() - startedAtMs >= noOutputTimeout) {
         failRunningTask(current, "no_output_timeout");
       }
     }, watchdogPoll);

@@ -405,6 +405,40 @@ describe("no-output watchdog", () => {
   });
 });
 
+describe("provider-usage-exhaustion detection", () => {
+  test("a rate-limit diagnostic in the log stops the child early with failureReason provider_usage_exhausted", async () => {
+    const child = fakeChild(7101);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 60000, // long enough that only exhaustion detection could trigger this
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n"
+    );
+
+    await new Promise((r) => setTimeout(r, 40));
+    assert.ok(killed.some((k) => k.signal === "SIGTERM"));
+
+    child.emit("exit", null, "SIGTERM");
+    assert.equal(mgr.status(dispatched.id).failureReason, "provider_usage_exhausted");
+  });
+
+  test("ordinary crash text is not misclassified as provider exhaustion", () => {
+    const child = fakeChild(7102);
+    const mgr = makeManager({ spawnFn: () => child, killFn: () => {} });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(mgr.status(dispatched.id).logPath, "TypeError: cannot read property 'x' of undefined\n");
+    child.emit("exit", 1, null);
+    assert.equal(mgr.status(dispatched.id).status, "crashed");
+    assert.equal(mgr.status(dispatched.id).failureReason, null);
+  });
+});
+
 describe("cancel()", () => {
   test("sends SIGTERM to the negative pid (process group), then escalates to SIGKILL after graceMs if still running", async () => {
     const child = fakeChild(777);
