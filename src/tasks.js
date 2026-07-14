@@ -56,6 +56,10 @@ const DEFAULT_DISPATCH_WINDOW_MS = positiveInteger(
   Number(process.env.TASKFERRY_DISPATCH_WINDOW_MS),
   5000
 );
+const DEFAULT_ADVISOR_SESSION_TTL_MS = positiveInteger(
+  Number(process.env.TASKFERRY_ADVISOR_SESSION_TTL_MS),
+  30 * 60 * 1000
+);
 
 // Factory rather than a module-level singleton, so tests can construct an
 // isolated instance with an injected spawnFn/killFn (no real `opencode`
@@ -79,12 +83,14 @@ export function createTaskManager({
   stateDir = DEFAULT_STATE_DIR,
   maxDispatchesPerWindow = DEFAULT_MAX_DISPATCHES_PER_WINDOW,
   dispatchWindowMs = DEFAULT_DISPATCH_WINDOW_MS,
+  advisorSessionTtlMs = DEFAULT_ADVISOR_SESSION_TTL_MS,
 } = {}) {
   const LOG_DIR = path.join(stateDir, "logs");
   const SUMMARY_DIR = path.join(stateDir, "summaries");
   const TASKS_FILE = path.join(stateDir, "tasks.json");
   const dispatchLimit = positiveInteger(maxDispatchesPerWindow, DEFAULT_MAX_DISPATCHES_PER_WINDOW);
   const dispatchWindow = positiveInteger(dispatchWindowMs, DEFAULT_DISPATCH_WINDOW_MS);
+  const advisorTtl = positiveInteger(advisorSessionTtlMs, DEFAULT_ADVISOR_SESSION_TTL_MS);
   for (const dir of [stateDir, LOG_DIR, SUMMARY_DIR]) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     fs.chmodSync(dir, 0o700);
@@ -110,6 +116,13 @@ export function createTaskManager({
   // instead of the caller round-tripping taskferry_status in a loop. Not
   // persisted or shared across a server restart, same as the tasks map itself.
   const waiters = new Map();
+
+  // Advisor session recency, keyed by opencode session id. Process-lifetime
+  // only, same as `tasks` and `waiters` -- a taskferry restart means every
+  // session id is "unknown," which resolveAdvisorSession() treats identically
+  // to "expired" rather than special-casing it. Prevents taskferry_advisor
+  // from silently resuming a conversation whose prompt cache has gone cold.
+  const advisorSessions = new Map();
 
   // Queued launches retain full prompts only in memory. Persisted queued tasks
   // become unknown on restart, just like running tasks, rather than launching
@@ -180,6 +193,19 @@ export function createTaskManager({
 
   function noSuchTask(taskId) {
     return new Error(`error: unknown task_id: ${taskId}\nhelp: run taskferry_list to see valid task ids`);
+  }
+
+  function resolveAdvisorSession(sessionId) {
+    if (!sessionId) return { sessionId: undefined, reset: false, previousSessionId: undefined };
+    const lastUsedAt = advisorSessions.get(sessionId);
+    if (lastUsedAt != null && Date.now() - lastUsedAt <= advisorTtl) {
+      return { sessionId, reset: false, previousSessionId: undefined };
+    }
+    return { sessionId: undefined, reset: true, previousSessionId: sessionId };
+  }
+
+  function touchAdvisorSession(sessionId) {
+    if (sessionId) advisorSessions.set(sessionId, Date.now());
   }
 
   function dispatch({ prompt, directory, model, variant, sessionId }) {
@@ -854,7 +880,19 @@ export function createTaskManager({
     }, fields);
   }
 
-  return { dispatch, cancel, status, poll, list, result, tail, summarize: summarizeTask, paths: { STATE_DIR: stateDir, LOG_DIR, SUMMARY_DIR, TASKS_FILE } };
+  return {
+    dispatch,
+    cancel,
+    status,
+    poll,
+    list,
+    result,
+    tail,
+    summarize: summarizeTask,
+    paths: { STATE_DIR: stateDir, LOG_DIR, SUMMARY_DIR, TASKS_FILE },
+    __resolveAdvisorSessionForTest: resolveAdvisorSession,
+    __touchAdvisorSessionForTest: touchAdvisorSession,
+  };
 }
 
 // The one real instance the MCP server uses: real spawn, real process.kill,

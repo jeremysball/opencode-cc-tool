@@ -13,7 +13,7 @@ import { createTaskManager } from "./tasks.js";
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -32,6 +32,7 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     verifySummaryAgentFn: verifySummaryAgentFn ?? (async () => {}),
     ...(maxDispatchesPerWindow != null ? { maxDispatchesPerWindow } : {}),
     ...(dispatchWindowMs != null ? { dispatchWindowMs } : {}),
+    ...(advisorSessionTtlMs != null ? { advisorSessionTtlMs } : {}),
   });
 }
 
@@ -453,6 +454,46 @@ describe("poll()", () => {
     assert.equal(settled.outputTail, " chunk");
     assert.equal(settled.outputTailTotalChars, output.length);
     assert.equal(settled.outputTailTruncated, true);
+  });
+});
+
+describe("advisor() session TTL resolution", () => {
+  test("a session used within the TTL passes through unchanged", () => {
+    const mgr = makeManager({ advisorSessionTtlMs: 1000 });
+    mgr.__touchAdvisorSessionForTest("ses_fresh");
+    const resolved = mgr.__resolveAdvisorSessionForTest("ses_fresh");
+    assert.deepEqual(resolved, { sessionId: "ses_fresh", reset: false, previousSessionId: undefined });
+  });
+
+  test("a session past the TTL resets to a fresh dispatch", async () => {
+    const mgr = makeManager({ advisorSessionTtlMs: 10 });
+    mgr.__touchAdvisorSessionForTest("ses_stale");
+    await new Promise((r) => setTimeout(r, 20));
+    const resolved = mgr.__resolveAdvisorSessionForTest("ses_stale");
+    assert.deepEqual(resolved, { sessionId: undefined, reset: true, previousSessionId: "ses_stale" });
+  });
+
+  test("a session id never seen before resolves identically to an expired one", () => {
+    const mgr = makeManager({ advisorSessionTtlMs: 1000 });
+    const resolved = mgr.__resolveAdvisorSessionForTest("ses_never_tracked");
+    assert.deepEqual(resolved, { sessionId: undefined, reset: true, previousSessionId: "ses_never_tracked" });
+  });
+
+  test("no session_id at all resolves with no reset (there was nothing to resume)", () => {
+    const mgr = makeManager({ advisorSessionTtlMs: 1000 });
+    const resolved = mgr.__resolveAdvisorSessionForTest(undefined);
+    assert.deepEqual(resolved, { sessionId: undefined, reset: false, previousSessionId: undefined });
+  });
+
+  test("touching a session refreshes its TTL window", async () => {
+    const mgr = makeManager({ advisorSessionTtlMs: 30 });
+    mgr.__touchAdvisorSessionForTest("ses_active");
+    await new Promise((r) => setTimeout(r, 20));
+    mgr.__touchAdvisorSessionForTest("ses_active"); // refresh before the 30ms TTL elapses
+    await new Promise((r) => setTimeout(r, 20));
+    // 40ms since the refresh-touch, but only 20ms since the second touch < 30ms TTL
+    const resolved = mgr.__resolveAdvisorSessionForTest("ses_active");
+    assert.equal(resolved.reset, false);
   });
 });
 
