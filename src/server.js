@@ -131,13 +131,13 @@ server.registerTool(
   {
     title: "Summarize observed opencode progress",
     description:
-      "Capture a bounded snapshot of a task's narration and queue an isolated DeepSeek summary task. The snapshot is sent to the configured summary-model provider; do not use this tool for narration containing secrets you do not want to send there.",
+      "Capture a bounded snapshot of a task's narration and queue an isolated summary task. The snapshot is sent to the configured summary-model provider; do not use this tool for narration containing secrets you do not want to send there.",
     inputSchema: {
       task_id: z.string().describe("Task id returned by opencode_dispatch."),
       max_words: z.number().int().min(75).max(300).optional().describe("Target summary length. Defaults to 200 words; valid range is 75 through 300."),
     },
   },
-  async ({ task_id, max_words }) => toon(tasks.summarize(task_id, max_words != null ? { maxWords: max_words } : undefined))
+  async ({ task_id, max_words }) => toon(await tasks.summarize(task_id, max_words != null ? { maxWords: max_words } : undefined))
 );
 
 server.registerTool(

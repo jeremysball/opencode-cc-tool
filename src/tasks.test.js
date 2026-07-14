@@ -13,7 +13,7 @@ import { createTaskManager } from "./tasks.js";
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, maxDispatchesPerWindow, dispatchWindowMs } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -29,6 +29,7 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     spawnFn: spawnFn ?? (() => { throw new Error("spawnFn was not injected for this test"); }),
     killFn: killFn ?? (() => { throw new Error("killFn was not injected for this test"); }),
     listModelsFn: listModelsFn ?? (() => "opencode-go/deepseek-v4-flash\n"),
+    verifySummaryAgentFn: verifySummaryAgentFn ?? (async () => {}),
     ...(maxDispatchesPerWindow != null ? { maxDispatchesPerWindow } : {}),
     ...(dispatchWindowMs != null ? { dispatchWindowMs } : {}),
   });
@@ -605,8 +606,9 @@ describe("tail()", () => {
 });
 
 describe("summarize()", () => {
-  test("uses an isolated tool-denied agent and private attachment", () => {
+  test("uses an isolated tool-denied agent and private attachment", async () => {
     let captured;
+    let verifiedEnv;
     const child = fakeChild();
     const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Investigated the issue" } });
     const mgr = makeManager({
@@ -616,9 +618,10 @@ describe("summarize()", () => {
         captured = { command, args, options };
         return child;
       },
+      verifySummaryAgentFn: async (env) => { verifiedEnv = env; },
     });
 
-    const summary = mgr.summarize("source", { maxWords: 150 });
+    const summary = await mgr.summarize("source", { maxWords: 150 });
     assert.equal(captured.command, "opencode");
     assert.ok(captured.args.includes("--pure"));
     assert.ok(captured.args.includes("--agent"));
@@ -627,31 +630,73 @@ describe("summarize()", () => {
     assert.equal(fs.statSync(attachment).mode & 0o777, 0o600);
     assert.equal(captured.options.cwd, mgr.paths.SUMMARY_DIR);
     assert.match(captured.options.env.OPENCODE_CONFIG_CONTENT, /"\*":"deny"/);
+    assert.equal(verifiedEnv.OPENCODE_CONFIG_CONTENT, captured.options.env.OPENCODE_CONFIG_CONTENT);
     assert.equal(summary.summaryTask.status, "running");
 
     child.emit("exit", 0, null);
     assert.equal(fs.existsSync(attachment), false);
   });
 
-  test("does not spend a model call when no text has been observed", () => {
+  test("does not spend a model call when no text has been observed", async () => {
     let spawned = false;
     const mgr = makeManager({
       tasksFixture: [baseTask({ id: "source" })],
       spawnFn: () => { spawned = true; return fakeChild(); },
     });
-    const result = mgr.summarize("source");
+    const result = await mgr.summarize("source");
     assert.equal(result.summary, "no model text observed yet");
     assert.equal(spawned, false);
   });
 
-  test("rejects an unavailable configured summary model before creating a task", () => {
+  test("rejects an unavailable configured summary model before creating a task", async () => {
     const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "progress" } });
     const mgr = makeManager({
       tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
       logs: { "source.ndjson": log },
       listModelsFn: () => "openai/gpt-5.6-luna\n",
     });
-    assert.throws(() => mgr.summarize("source"), /summary model is unavailable/);
+    await assert.rejects(mgr.summarize("source"), /summary model is unavailable/);
     assert.equal(mgr.list().tasks.length, 1);
+  });
+
+  test("does not launch when the effective summary agent isolation check fails", async () => {
+    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "progress" } });
+    let spawned = false;
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": log },
+      spawnFn: () => { spawned = true; return fakeChild(); },
+      verifySummaryAgentFn: async () => { throw new Error("bash is enabled"); },
+    });
+    await assert.rejects(mgr.summarize("source"), /summary agent isolation check failed/);
+    assert.equal(spawned, false);
+    assert.equal(mgr.list().tasks.length, 1);
+  });
+
+  test("preserves head and tail narration around an oversized log omission marker", async () => {
+    const child = fakeChild();
+    let attachment;
+    const events = [
+      JSON.stringify({ type: "text", part: { messageID: "head", text: "HEAD_MARKER" } }),
+      ...Array.from({ length: 160 }, (_, index) => JSON.stringify({
+        type: "text",
+        part: { messageID: `middle-${index}`, text: "x".repeat(700) },
+      })),
+      JSON.stringify({ type: "text", part: { messageID: "tail", text: "TAIL_MARKER" } }),
+    ].join("\n");
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": events },
+      spawnFn: (_command, args) => {
+        attachment = args[args.indexOf("-f") + 1];
+        return child;
+      },
+    });
+    await mgr.summarize("source");
+    const snapshot = JSON.parse(fs.readFileSync(attachment, "utf8"));
+    assert.match(snapshot.narration, /HEAD_MARKER/);
+    assert.match(snapshot.narration, /TAIL_MARKER/);
+    assert.match(snapshot.narration, /bytes omitted from source log/);
+    child.emit("exit", 0, null);
   });
 });

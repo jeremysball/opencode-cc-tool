@@ -1,8 +1,9 @@
-import { execFileSync, spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { promisify } from "node:util";
 
 const DEFAULT_STATE_DIR =
   process.env.OPENCODE_CC_TOOL_STATE_DIR ||
@@ -19,7 +20,9 @@ const TAIL_READ_BYTES = 1024 * 1024;
 const SUMMARY_INPUT_BYTES = 96 * 1024;
 const SUMMARY_MODEL = process.env.OPENCODE_CC_TOOL_SUMMARY_MODEL || "opencode-go/deepseek-v4-flash";
 const SUMMARY_AGENT = "opencode-cc-summary";
+const SUMMARY_PREFLIGHT_TIMEOUT_MS = 10000;
 const RESULT_FIELDS = new Set(["message", "narration", "tokens", "cost", "sessionId", "exitCode", "signal", "spawnError", "logPath"]);
+const execFileAsync = promisify(execFile);
 
 const SUMMARY_AGENT_CONFIG = JSON.stringify({
   agent: {
@@ -34,6 +37,15 @@ const SUMMARY_AGENT_CONFIG = JSON.stringify({
 
 function positiveInteger(value, fallback) {
   return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+}
+
+function summaryEnvironment() {
+  const env = { ...process.env };
+  delete env.OPENCODE_CONFIG;
+  delete env.OPENCODE_CONFIG_DIR;
+  delete env.OPENCODE_CONFIG_CONTENT;
+  env.OPENCODE_CONFIG_CONTENT = SUMMARY_AGENT_CONFIG;
+  return env;
 }
 
 const DEFAULT_MAX_DISPATCHES_PER_WINDOW = positiveInteger(
@@ -53,7 +65,17 @@ const DEFAULT_DISPATCH_WINDOW_MS = positiveInteger(
 export function createTaskManager({
   spawnFn = spawn,
   killFn = (pid, signal) => process.kill(pid, signal),
-  listModelsFn = () => execFileSync("opencode", ["models"], { encoding: "utf8" }),
+  listModelsFn = async () => (await execFileAsync("opencode", ["models"], { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS })).stdout,
+  verifySummaryAgentFn = async (env) => {
+    const { stdout, stderr } = await execFileAsync(
+      "opencode",
+      ["debug", "agent", SUMMARY_AGENT, "--pure", "--tool", "bash", "--params", JSON.stringify({ command: "true" })],
+      { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS, env }
+    );
+    if (!/disabled|denied/i.test(`${stdout}\n${stderr}`)) {
+      throw new Error("summary agent allowed bash");
+    }
+  },
   stateDir = DEFAULT_STATE_DIR,
   maxDispatchesPerWindow = DEFAULT_MAX_DISPATCHES_PER_WINDOW,
   dispatchWindowMs = DEFAULT_DISPATCH_WINDOW_MS,
@@ -97,6 +119,7 @@ export function createTaskManager({
   const launchTimes = [];
   let launchTimer = null;
   let modelsCache = { expiresAt: 0, output: "" };
+  let summaryAgentVerifiedUntil = 0;
   let stateLoadError = null;
 
   function loadPersisted() {
@@ -210,16 +233,26 @@ export function createTaskManager({
     };
   }
 
-  function summaryModelAvailable(model) {
+  async function summaryModelAvailable(model) {
     if (Date.now() >= modelsCache.expiresAt) {
       try {
-        modelsCache = { expiresAt: Date.now() + 5 * 60 * 1000, output: listModelsFn() };
+        modelsCache = { expiresAt: Date.now() + 5 * 60 * 1000, output: await listModelsFn() };
       } catch (err) {
         throw new Error(`error: could not list available OpenCode models: ${err.message}\nhelp: verify that opencode is installed and authenticated, then retry opencode_summary`);
       }
     }
     if (!modelsCache.output.split("\n").some((line) => line.trim() === model)) {
       throw new Error(`error: summary model is unavailable: ${model}\nhelp: set OPENCODE_CC_TOOL_SUMMARY_MODEL to an installed model, then retry opencode_summary`);
+    }
+  }
+
+  async function verifySummaryAgent(env) {
+    if (Date.now() < summaryAgentVerifiedUntil) return;
+    try {
+      await verifySummaryAgentFn(env);
+      summaryAgentVerifiedUntil = Date.now() + 5 * 60 * 1000;
+    } catch (err) {
+      throw new Error(`error: summary agent isolation check failed: ${err.message}\nhelp: verify that OpenCode denies the summary agent's tools before retrying opencode_summary`);
     }
   }
 
@@ -273,7 +306,7 @@ export function createTaskManager({
     return textOrder.map((mid) => textByMessageId.get(mid).join("")).join("\n\n");
   }
 
-  function summarizeTask(taskId, { maxWords = 200 } = {}) {
+  async function summarizeTask(taskId, { maxWords = 200 } = {}) {
     ensureStateLoaded();
     const source = tasks.get(taskId);
     if (!source) throw noSuchTask(taskId);
@@ -291,7 +324,8 @@ export function createTaskManager({
         help: `Run opencode_tail with task_id "${taskId}" after the task emits output`,
       };
     }
-    summaryModelAvailable(SUMMARY_MODEL);
+    const env = summaryEnvironment();
+    await Promise.all([summaryModelAvailable(SUMMARY_MODEL), verifySummaryAgent(env)]);
 
     const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
     const logPath = path.join(LOG_DIR, `${id}.ndjson`);
@@ -330,7 +364,7 @@ export function createTaskManager({
     };
     tasks.set(id, task);
     persist();
-    pendingLaunches.set(id, { kind: "summary", model: SUMMARY_MODEL, snapshotPath });
+    pendingLaunches.set(id, { kind: "summary", model: SUMMARY_MODEL, snapshotPath, env });
     launchQueue.push(id);
     launchQueuedTasks();
     return {
@@ -399,7 +433,7 @@ export function createTaskManager({
         cwd: isSummary ? SUMMARY_DIR : launch.directory,
         stdio: ["ignore", logFd, logFd],
         detached: true,
-        ...(isSummary ? { env: { ...process.env, OPENCODE_CONFIG_CONTENT: SUMMARY_AGENT_CONFIG } } : {}),
+        ...(isSummary ? { env: launch.env } : {}),
       });
       fs.closeSync(logFd);
       logFd = null;
