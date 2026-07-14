@@ -9,7 +9,7 @@ export function withFileLock(lockPath, fn, { staleMs = 10000, retryMs = 25, time
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     try {
-      fs.closeSync(fs.openSync(lockPath, "wx"));
+      fs.closeSync(fs.openSync(lockPath, "wx", 0o600));
       break;
     } catch (err) {
       if (err.code !== "EEXIST") throw err;
