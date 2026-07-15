@@ -135,8 +135,28 @@ const PROVIDER_EXHAUSTION_PATTERNS = [
   /insufficient_quota/i,
 ];
 
+// Scoped to opencode's own structured `type:"error"` events and raw
+// non-JSON lines (stderr, crash text) -- never a `type:"text"` event's
+// content. Those events are the model's own narration and routinely
+// contain these same words in unrelated, healthy output (writing
+// rate-limit-handling code, narrating "the server returned 429, retry
+// with backoff"); scanning the whole raw log killed tasks mid-run on that
+// false-positive surface (GLM-5.2 review of 0d944df..4e75129, finding 1).
 function detectProviderExhaustion(rawLogText) {
-  return PROVIDER_EXHAUSTION_PATTERNS.some((pattern) => pattern.test(rawLogText));
+  for (const line of rawLogText.split("\n")) {
+    if (!line.trim()) continue;
+    let evt;
+    try {
+      evt = JSON.parse(line);
+    } catch {
+      if (PROVIDER_EXHAUSTION_PATTERNS.some((pattern) => pattern.test(line))) return true;
+      continue;
+    }
+    if (evt.type !== "error") continue;
+    const text = typeof evt.message === "string" ? evt.message : JSON.stringify(evt);
+    if (PROVIDER_EXHAUSTION_PATTERNS.some((pattern) => pattern.test(text))) return true;
+  }
+  return false;
 }
 
 const SUMMARY_AGENT_CONFIG = JSON.stringify({

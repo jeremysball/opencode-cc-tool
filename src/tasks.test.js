@@ -484,6 +484,29 @@ describe("provider-usage-exhaustion detection", () => {
     assert.equal(mgr.status(dispatched.id).status, "crashed");
     assert.equal(mgr.status(dispatched.id).failureReason, null);
   });
+
+  test("a type:\"text\" narration event that legitimately mentions rate limits, quotas, or 429 is not misclassified as provider exhaustion (GLM-5.2 review finding)", async () => {
+    const child = fakeChild(7103);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 60000,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      [
+        JSON.stringify({ type: "text", part: { messageID: "m1", text: "I hit a 429 while testing the client, so I added quota and rate-limit backoff handling per the usage-limit spec." } }),
+        JSON.stringify({ type: "step_finish", part: { messageID: "m1", reason: "stop" } }),
+      ].join("\n") + "\n"
+    );
+
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(killed.length, 0);
+    assert.equal(mgr.status(dispatched.id).failureReason, null);
+  });
 });
 
 describe("cancel()", () => {
