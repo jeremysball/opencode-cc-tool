@@ -66,10 +66,10 @@ further throttle bursts but is not a concurrency limit.
 
 #### Concurrency and launch rate
 
-- `TASKFERRY_MAX_CONCURRENT_TASKS`: maximum number of tasks allowed to be
-  `running` at once. Defaults to `4`. Extra dispatches queue and start FIFO
-  as running tasks finish, are cancelled, fail to spawn, or hit the
-  no-output watchdog.
+- `TASKFERRY_MAX_CONCURRENT_TASKS`: maximum number of tasks a taskferry server
+  process allows to be `running` at once. Defaults to `4`. Extra dispatches
+  queue and start FIFO as running tasks finish, are cancelled, fail to spawn,
+  or hit the no-output watchdog.
 - `TASKFERRY_MAX_DISPATCHES_PER_WINDOW` / `TASKFERRY_DISPATCH_WINDOW_MS`: an
   independent, optional burst-rate control — at most this many *launches*
   per rolling window (defaults `2` per `5000`ms). This is not a concurrency
