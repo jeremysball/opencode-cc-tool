@@ -38,8 +38,13 @@ export function createTaskEvents(onEvent) {
     };
     try {
       onEvent(event);
-    } catch {
+    } catch (error) {
       // Event consumers observe task state; they cannot interrupt task lifecycle.
+      console.error("Dropped task.state event after onEvent failure", {
+        taskId: task.id,
+        status: event.status,
+        sequence: event.sequence,
+      }, error);
     }
   }
 

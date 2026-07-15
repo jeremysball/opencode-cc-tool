@@ -195,16 +195,32 @@ describe("task lifecycle events", () => {
 
   test("does not let an event callback failure change task lifecycle", () => {
     const child = fakeChild();
-    const manager = makeManager({
-      onEvent: () => {
-        throw new Error("observer failed");
-      },
-      spawnFn: () => child,
-    });
+    const diagnostics = [];
+    const originalConsoleError = console.error;
+    console.error = (...args) => diagnostics.push(args);
 
-    const task = manager.dispatch({ prompt: "survive observer", directory: os.tmpdir() });
-    child.emit("exit", 0, null);
+    try {
+      const manager = makeManager({
+        onEvent: () => {
+          throw new Error("observer failed");
+        },
+        spawnFn: () => child,
+      });
 
-    assert.equal(manager.status(task.id).status, "done");
+      const task = manager.dispatch({ prompt: "survive observer", directory: os.tmpdir() });
+      child.emit("exit", 0, null);
+
+      assert.equal(manager.status(task.id).status, "done");
+      assert.equal(diagnostics.length, 3);
+      assert.equal(diagnostics[0][0], "Dropped task.state event after onEvent failure");
+      assert.deepEqual(diagnostics[0][1], {
+        taskId: task.id,
+        status: "queued",
+        sequence: 1,
+      });
+      assert.equal(diagnostics[0][2].message, "observer failed");
+    } finally {
+      console.error = originalConsoleError;
+    }
   });
 });
