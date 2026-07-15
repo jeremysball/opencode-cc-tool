@@ -115,6 +115,107 @@ import { withFileLock } from "./state-lock.js";
  * @property {string} [next]
  */
 
+/**
+ * @typedef {object} SummaryOf
+ * @property {string} sourceTaskId
+ * @property {string} sourceStatus
+ * @property {string} capturedAt
+ * @property {number} sourceLogBytes
+ * @property {number} summaryInputBytes
+ * @property {number} maxWords
+ */
+
+/**
+ * @typedef {object} Task
+ * @property {string} id
+ * @property {string} status
+ * @property {string} directory
+ * @property {string} model
+ * @property {string|null} variant
+ * @property {string|null} sessionId
+ * @property {number|null} pid
+ * @property {string} startedAt
+ * @property {string|null} endedAt
+ * @property {number|null} exitCode
+ * @property {NodeJS.Signals|null} signal
+ * @property {string} logPath
+ * @property {string} promptPreview
+ * @property {number|null} promptTotalChars
+ * @property {string|null} spawnError
+ * @property {boolean} cancelRequested
+ * @property {SummaryOf} [summaryOf]
+ */
+
+/**
+ * @typedef {object} TaskSummary
+ * @property {string} id
+ * @property {string} status
+ * @property {string} directory
+ * @property {string} model
+ * @property {string|null} sessionId
+ * @property {number|null} pid
+ * @property {string} startedAt
+ * @property {string|null} endedAt
+ * @property {number|null} exitCode
+ * @property {NodeJS.Signals|null} signal
+ * @property {string} logPath
+ * @property {string} promptPreview
+ * @property {number} [promptTotalChars]
+ * @property {SummaryOf} [summaryOf]
+ * @property {boolean} cancelRequested
+ */
+
+/**
+ * @typedef {object} LogActivity
+ * @property {number} logBytesWritten
+ * @property {string|null} logLastWriteAt
+ * @property {boolean} logHasEvent
+ */
+
+/**
+ * @typedef {TaskSummary & Partial<LogActivity> & {outputTail?: string, outputTailTotalChars?: number, outputTailTruncated?: boolean, next?: string}} TaskStatus
+ */
+
+/**
+ * @typedef {object} DispatchLaunch
+ * @property {string} prompt
+ * @property {string} directory
+ * @property {string} model
+ * @property {string|null} variant
+ * @property {string|null|undefined} [sessionId]
+ * @property {undefined} [kind]
+ * @property {undefined} [snapshotPath]
+ */
+
+/**
+ * @typedef {object} SummaryLaunch
+ * @property {"summary"} kind
+ * @property {string} model
+ * @property {string} snapshotPath
+ * @property {NodeJS.ProcessEnv} env
+ */
+
+/** @typedef {DispatchLaunch|SummaryLaunch} LaunchSpec */
+
+/**
+ * @typedef {object} ResultDetail
+ * @property {string} taskId
+ * @property {string} status
+ * @property {string} [message]
+ * @property {string} [narration]
+ * @property {number} [narrationTotalChars]
+ * @property {boolean} [narrationTruncated]
+ * @property {number|null} [exitCode]
+ * @property {NodeJS.Signals|null} [signal]
+ * @property {string|null} [spawnError]
+ * @property {string|null} [sessionId]
+ * @property {unknown} [tokens]
+ * @property {number|null} [cost]
+ * @property {string} [logPath]
+ * @property {SummaryOf} [summaryOf]
+ * @property {string} [next]
+ */
+
 const DEFAULT_STATE_DIR =
   process.env.TASKFERRY_STATE_DIR ||
   path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "taskferry");
