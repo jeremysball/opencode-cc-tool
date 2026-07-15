@@ -20,6 +20,7 @@ fail=0
 # --- 1. parse check (validates the STAGED content) ---
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
+repo="$(git rev-parse --show-toplevel)"
 for f in $files; do
   blob="$tmp/$(printf '%s' "$f" | tr '/' '_')"
   git show ":$f" > "$blob" 2>/dev/null || continue
@@ -30,19 +31,19 @@ for f in $files; do
   fi
 done
 
-# --- 2. eslint (working-tree copy of the staged files, so config globs match) ---
-if [ -x node_modules/.bin/eslint ]; then
-  # shellcheck disable=SC2086
-  node_modules/.bin/eslint $files || fail=1
+# --- 2. eslint / tsc (the complete staged tree, not working-tree files) ---
+if [ -x "$repo/node_modules/.bin/eslint" ]; then
+  mkdir -p "$tmp/tree"
+  git checkout-index --all --prefix="$tmp/tree/"
+  ln -s "$repo/node_modules" "$tmp/tree/node_modules"
+  if ! (
+    cd "$tmp/tree" || exit 1
+    ./node_modules/.bin/eslint . && ./node_modules/.bin/tsc --noEmit
+  ); then
+    fail=1
+  fi
 else
-  echo "⚠ eslint not installed — run 'npm install' to enable lint checks."
-fi
-
-# --- 3. tsc (whole-project: JSDoc types can be affected by any covered file) ---
-if [ -x node_modules/.bin/tsc ]; then
-  node_modules/.bin/tsc --noEmit || fail=1
-else
-  echo "⚠ typescript not installed — run 'npm install' to enable type checks."
+  echo "⚠ eslint and typescript are not installed — run 'npm install' to enable quality checks."
 fi
 
 if [ "$fail" -ne 0 ]; then

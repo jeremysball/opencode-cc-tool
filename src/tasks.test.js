@@ -418,6 +418,7 @@ describe("no-output watchdog", () => {
 
     await new Promise((r) => setTimeout(r, 60));
     assert.ok(killed.some((k) => k.signal === "SIGTERM"), "watchdog must SIGTERM the stuck child's process group");
+    assert.equal(JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"))[0].failureReason, "no_output_timeout");
 
     child.emit("exit", null, "SIGTERM");
     const s = mgr.status(dispatched.id);
@@ -455,6 +456,26 @@ describe("no-output watchdog", () => {
     assert.equal(mgr.status(dispatched.id).failureReason, null);
   });
 
+  test("repeated non-JSON output does not reset the no-output watchdog", async () => {
+    const child = fakeChild(7004);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 30,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const logPath = mgr.status(dispatched.id).logPath;
+    const interval = setInterval(() => fs.appendFileSync(logPath, "stderr noise\n"), 10);
+
+    await new Promise((r) => setTimeout(r, 70));
+    clearInterval(interval);
+    assert.ok(killed.some((k) => k.signal === "SIGTERM"));
+
+    child.emit("exit", null, "SIGTERM");
+  });
+
   test("a running child that goes silent again after early output is eventually stopped (GLM-5.2 review finding)", async () => {
     const child = fakeChild(7003);
     const killed = [];
@@ -490,6 +511,25 @@ describe("provider-usage-exhaustion detection", () => {
       mgr.status(dispatched.id).logPath,
       JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n"
     );
+
+    await new Promise((r) => setTimeout(r, 40));
+    assert.ok(killed.some((k) => k.signal === "SIGTERM"));
+
+    child.emit("exit", null, "SIGTERM");
+    assert.equal(mgr.status(dispatched.id).failureReason, "provider_usage_exhausted");
+  });
+
+  test("an unterminated provider exhaustion diagnostic stops the child early", async () => {
+    const child = fakeChild(7104);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 60000,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(mgr.status(dispatched.id).logPath, "rate limit exceeded");
 
     await new Promise((r) => setTimeout(r, 40));
     assert.ok(killed.some((k) => k.signal === "SIGTERM"));
@@ -1413,7 +1453,7 @@ describe("key slots (dispatch)", () => {
     });
     let capturedOpts = null;
     const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      spawnFn: (cmd, args, _opts) => { capturedOpts = _opts; return fakeChild(); },
       keySlotsSpec: "primary:AXI_TEST_KEY_PRIMARY,backup:AXI_TEST_KEY_BACKUP",
       providerKeyEnvName: "OPENCODE_GO_API_KEY",
     });

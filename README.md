@@ -40,7 +40,7 @@ agent-facing CLIs/tools: minimal per-row schemas, explicit empty states,
 `error:`/`help:` pairs on failure, and a `next` hint on responses where the
 follow-up call isn't obvious.
 
-### `taskferry_dispatch(prompt, directory, model?, variant?, session_id?)`
+### `taskferry_dispatch(prompt, directory, model?, variant?, session_id?, key_slot?)`
 
 Queues `opencode run --dir <directory> --auto --format json -- <prompt>` for
 background execution, with stdout and stderr redirected to a private per-task
@@ -105,7 +105,25 @@ further throttle bursts but is not a concurrency limit.
 - The MCP server only sees environment values present at its own startup;
   restart it after changing any of these variables.
 
-### `taskferry_poll(task_id, timeout_ms?, tail_chars?)`
+To use a backup slot, start Claude Code with both source variables available,
+then register the mapping and target variable with taskferry:
+
+```bash
+export OPENCODE_GO_API_KEY="..."
+export OPENCODE_GO_API_KEY_BACKUP="..."
+claude mcp add taskferry \
+  -e TASKFERRY_KEY_SLOTS="primary:OPENCODE_GO_API_KEY,backup:OPENCODE_GO_API_KEY_BACKUP" \
+  -e TASKFERRY_PROVIDER_KEY_ENV="OPENCODE_GO_API_KEY" \
+  -- node /path/to/taskferry/src/server.js
+```
+
+Then select the slot without putting its value in the tool call:
+
+```text
+taskferry_dispatch({ prompt: "review this diff", directory: "/repo", key_slot: "backup" })
+```
+
+### `taskferry_poll(task_id, timeout_ms?, tail_chars?, full?)`
 
 Blocks until the task's real `exit` event fires, or `timeout_ms` elapses
 (capped at 45000 regardless of what's passed, to stay under Claude Code's
@@ -116,7 +134,9 @@ instead of looping on `taskferry_status` yourself. If it returns with
 `status: "queued"` or `"running"`, the task simply outlived the cap; call it again. Pass
 `tail_chars` to include the trailing parsed narration from a task that is
 still running after the timeout, plus its full character count and whether
-the tail was truncated.
+the tail was truncated. It returns lean status fields by default; pass
+`full: true` for the static directory, model, session id, log path, and prompt
+preview fields.
 
 ### `taskferry_advisor(prompt, directory, model, variant?, session_id?, timeout_ms?)`
 
@@ -150,13 +170,16 @@ already finished is a no-op that returns a `note` instead of an error. The
 task's status becomes `"cancelled"` once its exit event lands, distinct
 from `"crashed"`.
 
-### `taskferry_status(task_id)`
+### `taskferry_status(task_id, full?)`
 
 Returns `{ status: "queued" | "running" | "done" | "crashed" | "cancelled" |
-"unknown", exitCode, signal, logPath, ... }`. `status` comes from the child
+"unknown", exitCode, signal, ... }`. `status` comes from the child
 process's actual exit event (`child.on("exit", ...)`), not from parsing
 output. `"unknown"` appears only if the server process restarted while the
 task was still running; see Limitations.
+
+It returns lean status fields by default. Pass `full: true` for the static
+directory, model, session id, log path, and prompt preview fields.
 
 `failureReason` is `null` unless the task was stopped by the no-output
 watchdog (`"no_output_timeout"`) or provider-usage-exhaustion detection
