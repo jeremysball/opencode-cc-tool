@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { promisify } from "node:util";
+import { withFileLock } from "./state-lock.js";
 
 /**
  * @typedef {object} SummaryOf
@@ -33,6 +34,8 @@ import { promisify } from "node:util";
  * @property {number|null} promptTotalChars
  * @property {string|null} spawnError
  * @property {boolean} cancelRequested
+ * @property {string|null} [failureReason]
+ * @property {string|null} [keySlot]
  * @property {SummaryOf} [summaryOf]
  */
 
@@ -53,6 +56,8 @@ import { promisify } from "node:util";
  * @property {number} [promptTotalChars]
  * @property {SummaryOf} [summaryOf]
  * @property {boolean} cancelRequested
+ * @property {string|null} [failureReason]
+ * @property {string|null} [keySlot]
  */
 
 /**
@@ -73,6 +78,7 @@ import { promisify } from "node:util";
  * @property {string} model
  * @property {string|null} variant
  * @property {string|null|undefined} [sessionId]
+ * @property {string|null} [keyEnvValue]
  * @property {undefined} [kind]
  * @property {undefined} [snapshotPath]
  */
@@ -83,6 +89,7 @@ import { promisify } from "node:util";
  * @property {string} model
  * @property {string} snapshotPath
  * @property {NodeJS.ProcessEnv} env
+ * @property {string|null} [keyEnvValue]
  */
 
 /** @typedef {DispatchLaunch|SummaryLaunch} LaunchSpec */
@@ -98,6 +105,8 @@ import { promisify } from "node:util";
  * @property {number|null} [exitCode]
  * @property {NodeJS.Signals|null} [signal]
  * @property {string|null} [spawnError]
+ * @property {string|null} [failureReason]
+ * @property {string|null} [keySlot]
  * @property {string|null} [sessionId]
  * @property {unknown} [tokens]
  * @property {number|null} [cost]
@@ -122,8 +131,42 @@ const SUMMARY_INPUT_BYTES = 96 * 1024;
 const SUMMARY_MODEL = process.env.TASKFERRY_SUMMARY_MODEL || "opencode-go/deepseek-v4-flash";
 const SUMMARY_AGENT = "taskferry-summary";
 const SUMMARY_PREFLIGHT_TIMEOUT_MS = 10000;
-const RESULT_FIELDS = new Set(["message", "narration", "tokens", "cost", "sessionId", "exitCode", "signal", "spawnError", "logPath"]);
+const RESULT_FIELDS = new Set(["message", "narration", "tokens", "cost", "sessionId", "exitCode", "signal", "spawnError", "failureReason", "keySlot", "logPath"]);
 const execFileAsync = promisify(execFile);
+
+const PROVIDER_EXHAUSTION_PATTERNS = [
+  /rate.?limit/i,
+  /\bquota\b/i,
+  /usage.?limit/i,
+  /too many requests/i,
+  /\b429\b/i,
+  /insufficient_quota/i,
+];
+
+// Scoped to opencode's own structured `type:"error"` events and raw
+// non-JSON lines (stderr, crash text) -- never a `type:"text"` event's
+// content. Those events are the model's own narration and routinely
+// contain these same words in unrelated, healthy output (writing
+// rate-limit-handling code, narrating "the server returned 429, retry
+// with backoff"); scanning the whole raw log killed tasks mid-run on that
+// false-positive surface (GLM-5.2 review of 0d944df..4e75129, finding 1).
+/** @param {string} rawLogText */
+function detectProviderExhaustion(rawLogText) {
+  for (const line of rawLogText.split("\n")) {
+    if (!line.trim()) continue;
+    let evt;
+    try {
+      evt = JSON.parse(line);
+    } catch {
+      if (PROVIDER_EXHAUSTION_PATTERNS.some((pattern) => pattern.test(line))) return true;
+      continue;
+    }
+    if (evt.type !== "error") continue;
+    const text = typeof evt.message === "string" ? evt.message : JSON.stringify(evt);
+    if (PROVIDER_EXHAUSTION_PATTERNS.some((pattern) => pattern.test(text))) return true;
+  }
+  return false;
+}
 
 const SUMMARY_AGENT_CONFIG = JSON.stringify({
   agent: {
@@ -145,16 +188,6 @@ function positiveInteger(value, fallback) {
   return Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
 
-/** @returns {NodeJS.ProcessEnv} */
-function summaryEnvironment() {
-  const env = { ...process.env };
-  delete env.OPENCODE_CONFIG;
-  delete env.OPENCODE_CONFIG_DIR;
-  delete env.OPENCODE_CONFIG_CONTENT;
-  env.OPENCODE_CONFIG_CONTENT = SUMMARY_AGENT_CONFIG;
-  return env;
-}
-
 /**
  * @param {unknown} err
  * @returns {string|undefined}
@@ -171,6 +204,27 @@ function errMessage(err) {
   return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * @param {string|undefined} spec
+ * @returns {Map<string, string>}
+ */
+function parseKeySlots(spec) {
+  const slots = new Map();
+  if (!spec) return slots;
+  for (const entry of spec.split(",")) {
+    const trimmed = entry.trim();
+    if (!trimmed) continue;
+    const sepIndex = trimmed.indexOf(":");
+    const name = sepIndex === -1 ? "" : trimmed.slice(0, sepIndex).trim();
+    const sourceEnvVar = sepIndex === -1 ? "" : trimmed.slice(sepIndex + 1).trim();
+    if (!name || !sourceEnvVar) {
+      throw new Error(`error: malformed TASKFERRY_KEY_SLOTS entry: ${JSON.stringify(trimmed)}\nhelp: use the form name:ENV_VAR_NAME, comma-separated`);
+    }
+    slots.set(name, sourceEnvVar);
+  }
+  return slots;
+}
+
 const DEFAULT_MAX_DISPATCHES_PER_WINDOW = positiveInteger(
   Number(process.env.TASKFERRY_MAX_DISPATCHES_PER_WINDOW),
   2
@@ -179,21 +233,41 @@ const DEFAULT_DISPATCH_WINDOW_MS = positiveInteger(
   Number(process.env.TASKFERRY_DISPATCH_WINDOW_MS),
   5000
 );
+const DEFAULT_MAX_CONCURRENT_TASKS = positiveInteger(
+  Number(process.env.TASKFERRY_MAX_CONCURRENT_TASKS),
+  4
+);
 const DEFAULT_ADVISOR_SESSION_TTL_MS = positiveInteger(
   Number(process.env.TASKFERRY_ADVISOR_SESSION_TTL_MS),
   30 * 60 * 1000
 );
+const DEFAULT_NO_OUTPUT_TIMEOUT_MS = positiveInteger(
+  Number(process.env.TASKFERRY_NO_OUTPUT_TIMEOUT_MS),
+  120000
+);
+const DEFAULT_WATCHDOG_POLL_MS = positiveInteger(
+  Number(process.env.TASKFERRY_WATCHDOG_POLL_MS),
+  2000
+);
+const WATCHDOG_KILL_GRACE_MS = 5000;
 
 /**
  * @param {object} [options]
  * @param {typeof spawn} [options.spawnFn]
  * @param {(pid: number, signal: NodeJS.Signals) => void} [options.killFn]
- * @param {() => Promise<string>} [options.listModelsFn]
+ * @param {(env?: NodeJS.ProcessEnv) => Promise<string>} [options.listModelsFn]
  * @param {(env: NodeJS.ProcessEnv) => Promise<void>} [options.verifySummaryAgentFn]
  * @param {string} [options.stateDir]
  * @param {number} [options.maxDispatchesPerWindow]
  * @param {number} [options.dispatchWindowMs]
+ * @param {number} [options.maxConcurrentTasks]
  * @param {number} [options.advisorSessionTtlMs]
+ * @param {number} [options.noOutputTimeoutMs]
+ * @param {number} [options.watchdogPollMs]
+ * @param {string} [options.keySlotsSpec]
+ * @param {string|null} [options.providerKeyEnvName]
+ * @param {string|null} [options.summaryKeySlot]
+ * @param {string|null} [options.summaryProviderKeyEnvName]
  */
 // Factory rather than a module-level singleton, so tests can construct an
 // isolated instance with an injected spawnFn/killFn (no real `opencode`
@@ -203,7 +277,7 @@ const DEFAULT_ADVISOR_SESSION_TTL_MS = positiveInteger(
 export function createTaskManager({
   spawnFn = spawn,
   killFn = (pid, signal) => process.kill(pid, signal),
-  listModelsFn = async () => (await execFileAsync("opencode", ["models"], { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS })).stdout,
+  listModelsFn = async (env) => (await execFileAsync("opencode", ["models"], { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS, env })).stdout,
   verifySummaryAgentFn = async (env) => {
     const { stdout, stderr } = await execFileAsync(
       "opencode",
@@ -217,14 +291,60 @@ export function createTaskManager({
   stateDir = DEFAULT_STATE_DIR,
   maxDispatchesPerWindow = DEFAULT_MAX_DISPATCHES_PER_WINDOW,
   dispatchWindowMs = DEFAULT_DISPATCH_WINDOW_MS,
+  maxConcurrentTasks = DEFAULT_MAX_CONCURRENT_TASKS,
   advisorSessionTtlMs = DEFAULT_ADVISOR_SESSION_TTL_MS,
+  noOutputTimeoutMs = DEFAULT_NO_OUTPUT_TIMEOUT_MS,
+  watchdogPollMs = DEFAULT_WATCHDOG_POLL_MS,
+  keySlotsSpec = process.env.TASKFERRY_KEY_SLOTS,
+  providerKeyEnvName = process.env.TASKFERRY_PROVIDER_KEY_ENV || null,
+  summaryKeySlot = process.env.TASKFERRY_SUMMARY_KEY_SLOT || null,
+  summaryProviderKeyEnvName = process.env.TASKFERRY_SUMMARY_PROVIDER_KEY_ENV || null,
 } = {}) {
   const LOG_DIR = path.join(stateDir, "logs");
   const SUMMARY_DIR = path.join(stateDir, "summaries");
   const TASKS_FILE = path.join(stateDir, "tasks.json");
+  const LOCK_FILE = path.join(stateDir, "tasks.lock");
   const dispatchLimit = positiveInteger(maxDispatchesPerWindow, DEFAULT_MAX_DISPATCHES_PER_WINDOW);
   const dispatchWindow = positiveInteger(dispatchWindowMs, DEFAULT_DISPATCH_WINDOW_MS);
+  const concurrencyLimit = positiveInteger(maxConcurrentTasks, DEFAULT_MAX_CONCURRENT_TASKS);
   const advisorTtl = positiveInteger(advisorSessionTtlMs, DEFAULT_ADVISOR_SESSION_TTL_MS);
+  const noOutputTimeout = positiveInteger(noOutputTimeoutMs, DEFAULT_NO_OUTPUT_TIMEOUT_MS);
+  const watchdogPoll = positiveInteger(watchdogPollMs, DEFAULT_WATCHDOG_POLL_MS);
+  const keySlots = parseKeySlots(keySlotsSpec);
+
+  function environmentWithoutKeySlotSources() {
+    const env = { ...process.env };
+    for (const sourceEnvVar of keySlots.values()) delete env[sourceEnvVar];
+    return env;
+  }
+
+  /** @param {string|null|undefined} keyEnvValue */
+  function dispatchEnvironment(keyEnvValue) {
+    const env = environmentWithoutKeySlotSources();
+    if (keyEnvValue != null && providerKeyEnvName) env[providerKeyEnvName] = keyEnvValue;
+    return env;
+  }
+
+  function summaryEnvironment() {
+    const env = environmentWithoutKeySlotSources();
+    delete env.OPENCODE_CONFIG;
+    delete env.OPENCODE_CONFIG_DIR;
+    delete env.OPENCODE_CONFIG_CONTENT;
+    env.OPENCODE_CONFIG_CONTENT = SUMMARY_AGENT_CONFIG;
+    if (summaryKeySlot && summaryProviderKeyEnvName) {
+      const sourceEnvVar = keySlots.get(summaryKeySlot);
+      if (!sourceEnvVar) {
+        throw new Error(`error: TASKFERRY_SUMMARY_KEY_SLOT "${summaryKeySlot}" is not a configured key slot\nhelp: add it to TASKFERRY_KEY_SLOTS or fix TASKFERRY_SUMMARY_KEY_SLOT`);
+      }
+      const value = process.env[sourceEnvVar];
+      if (!value) {
+        throw new Error(`error: summary key slot "${summaryKeySlot}" source variable ${sourceEnvVar} is not set\nhelp: set ${sourceEnvVar} and restart the taskferry MCP server`);
+      }
+      env[summaryProviderKeyEnvName] = value;
+    }
+    return env;
+  }
+
   for (const dir of [stateDir, LOG_DIR, SUMMARY_DIR]) {
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     fs.chmodSync(dir, 0o700);
@@ -246,6 +366,12 @@ export function createTaskManager({
   // persist(), and a Timeout isn't serializable data.
   /** @type {Map<string, NodeJS.Timeout>} */
   const escalationTimers = new Map();
+
+  // No-output watchdog tickers, keyed by task id. Each one polls the task's
+  // log file on a fixed interval; if no parseable event has landed by the
+  // configured deadline, failRunningTask() escalates the child. Same
+  // "not in the task object" reason as escalationTimers.
+  const runningWatchers = new Map();
 
   // Pending taskferry_poll callbacks, keyed by task id. Lets a single MCP tool
   // call block until the child's exit event fires (or a timeout elapses)
@@ -273,6 +399,7 @@ export function createTaskManager({
   const launchTimes = [];
   /** @type {NodeJS.Timeout|null} */
   let launchTimer = null;
+  let runningCount = 0;
   let modelsCache = { expiresAt: 0, output: "" };
   let summaryAgentVerifiedUntil = 0;
   /** @type {Error|null} */
@@ -299,27 +426,43 @@ export function createTaskManager({
     throw new Error(`error: could not read persisted task state: ${stateLoadError.message}\nhelp: repair ${TASKS_FILE} before using opencode task tools`);
   }
 
-  function persist() {
-    const all = Array.from(tasks.values());
-    const temporary = path.join(stateDir, `.tasks-${randomUUID()}.json`);
-    // Throwing from a `finally` would mask a real error from the try block
-    // above (e.g. a full disk on writeFileSync) with an unrelated cleanup
-    // failure. Defer the cleanup error and only surface it once the try
-    // block itself has succeeded.
-    /** @type {unknown} */
-    let cleanupError;
-    try {
-      fs.writeFileSync(temporary, JSON.stringify(all, null, 2), { mode: 0o600 });
-      fs.renameSync(temporary, TASKS_FILE);
-      fs.chmodSync(TASKS_FILE, 0o600);
-    } finally {
+  /**
+   * @param {string} taskId
+   */
+  function persistTask(taskId) {
+    withFileLock(LOCK_FILE, () => {
+      /** @type {Task[]} */
+      let current = [];
       try {
-        fs.unlinkSync(temporary);
+        current = JSON.parse(fs.readFileSync(TASKS_FILE, "utf8"));
       } catch (err) {
-        if (errCode(err) !== "ENOENT") cleanupError = err;
+        if (errCode(err) !== "ENOENT") throw err;
       }
-    }
-    if (cleanupError) throw cleanupError;
+      const byId = new Map(current.map((t) => [t.id, t]));
+      const local = tasks.get(taskId);
+      if (local) byId.set(taskId, local);
+      else byId.delete(taskId);
+      const all = Array.from(byId.values());
+      const temporary = path.join(stateDir, `.tasks-${randomUUID()}.json`);
+      // Throwing from a `finally` would mask a real error from the try block
+      // above (e.g. a full disk on writeFileSync) with an unrelated cleanup
+      // failure. Defer the cleanup error and only surface it once the try
+      // block itself has succeeded.
+      /** @type {unknown} */
+      let cleanupError;
+      try {
+        fs.writeFileSync(temporary, JSON.stringify(all, null, 2), { mode: 0o600 });
+        fs.renameSync(temporary, TASKS_FILE);
+        fs.chmodSync(TASKS_FILE, 0o600);
+      } finally {
+        try {
+          fs.unlinkSync(temporary);
+        } catch (err) {
+          if (errCode(err) !== "ENOENT") cleanupError = err;
+        }
+      }
+      if (cleanupError) throw cleanupError;
+    });
   }
 
   /**
@@ -327,9 +470,11 @@ export function createTaskManager({
    * @returns {TaskSummary}
    */
   function summarize(task) {
-    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested } = task;
+    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, failureReason, keySlot } = task;
     return {
       id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath,
+      failureReason: failureReason ?? null,
+      keySlot: keySlot ?? null,
       promptPreview,
       ...(promptTotalChars != null ? { promptTotalChars } : {}),
       ...(task.summaryOf ? { summaryOf: task.summaryOf } : {}),
@@ -377,15 +522,36 @@ export function createTaskManager({
   }
 
   /**
+   * @param {string|null|undefined} keySlot
+   * @returns {{keySlot: string|null, keyEnvValue: string|null}}
+   */
+  function resolveKeySlot(keySlot) {
+    if (keySlot == null) return { keySlot: null, keyEnvValue: null };
+    if (!providerKeyEnvName) {
+      throw new Error("error: key_slot given but TASKFERRY_PROVIDER_KEY_ENV is not configured\nhelp: set TASKFERRY_PROVIDER_KEY_ENV on the server before using key_slot");
+    }
+    if (!keySlots.has(keySlot)) {
+      throw new Error(`error: unknown key_slot: ${keySlot}\nhelp: configured slots are: ${Array.from(keySlots.keys()).join(", ") || "(none configured)"}`);
+    }
+    const sourceEnvVar = /** @type {string} */ (keySlots.get(keySlot));
+    const value = process.env[sourceEnvVar];
+    if (!value) {
+      throw new Error(`error: key_slot "${keySlot}" source variable ${sourceEnvVar} is not set\nhelp: set ${sourceEnvVar} and restart the taskferry MCP server`);
+    }
+    return { keySlot, keyEnvValue: value };
+  }
+
+  /**
    * @param {object} params
    * @param {string} params.prompt
    * @param {string} params.directory
    * @param {string} [params.model]
    * @param {string} [params.variant]
    * @param {string|undefined} [params.sessionId]
+   * @param {string|null} [params.keySlot]
    * @returns {TaskSummary & {next: string}}
    */
-  function dispatch({ prompt, directory, model, variant, sessionId }) {
+  function dispatch({ prompt, directory, model, variant, sessionId, keySlot }) {
     ensureStateLoaded();
     if (!prompt || typeof prompt !== "string") {
       throw new Error("error: prompt is required\nhelp: taskferry_dispatch requires a non-empty prompt string");
@@ -396,6 +562,8 @@ export function createTaskManager({
     if (!fs.existsSync(directory) || !fs.statSync(directory).isDirectory()) {
       throw new Error(`error: directory does not exist: ${directory}\nhelp: check the path or create the directory first`);
     }
+
+    const resolvedKeySlot = resolveKeySlot(keySlot);
 
     const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
     const logPath = path.join(LOG_DIR, `${id}.ndjson`);
@@ -421,10 +589,12 @@ export function createTaskManager({
       promptTotalChars: prompt.length > 200 ? prompt.length : null,
       spawnError: null,
       cancelRequested: false,
+      failureReason: null,
+      keySlot: resolvedKeySlot.keySlot,
     };
     tasks.set(id, task);
-    persist();
-    pendingLaunches.set(id, { prompt, directory, model: resolvedModel, variant: task.variant, sessionId });
+    persistTask(task.id);
+    pendingLaunches.set(id, { prompt, directory, model: resolvedModel, variant: task.variant, sessionId, keyEnvValue: resolvedKeySlot.keyEnvValue });
     launchQueue.push(id);
     launchQueuedTasks();
 
@@ -437,11 +607,14 @@ export function createTaskManager({
     };
   }
 
-  /** @param {string} model */
-  async function summaryModelAvailable(model) {
+  /**
+   * @param {string} model
+   * @param {NodeJS.ProcessEnv} env
+   */
+  async function summaryModelAvailable(model, env) {
     if (Date.now() >= modelsCache.expiresAt) {
       try {
-        modelsCache = { expiresAt: Date.now() + 5 * 60 * 1000, output: await listModelsFn() };
+        modelsCache = { expiresAt: Date.now() + 5 * 60 * 1000, output: await listModelsFn(env) };
       } catch (err) {
         throw new Error(`error: could not list available OpenCode models: ${errMessage(err)}\nhelp: verify that opencode is installed and authenticated, then retry taskferry_summary`, { cause: err });
       }
@@ -546,7 +719,7 @@ export function createTaskManager({
       };
     }
     const env = summaryEnvironment();
-    await Promise.all([summaryModelAvailable(SUMMARY_MODEL), verifySummaryAgent(env)]);
+    await Promise.all([summaryModelAvailable(SUMMARY_MODEL, env), verifySummaryAgent(env)]);
 
     const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
     const logPath = path.join(LOG_DIR, `${id}.ndjson`);
@@ -583,10 +756,11 @@ export function createTaskManager({
       promptTotalChars: null,
       spawnError: null,
       cancelRequested: false,
+      failureReason: null,
       summaryOf,
     };
     tasks.set(id, task);
-    persist();
+    persistTask(task.id);
     pendingLaunches.set(id, { kind: "summary", model: SUMMARY_MODEL, snapshotPath, env });
     launchQueue.push(id);
     launchQueuedTasks();
@@ -602,11 +776,14 @@ export function createTaskManager({
   }
 
   function launchQueuedTasks() {
-    launchTimer = null;
+    if (launchTimer) {
+      clearTimeout(launchTimer);
+      launchTimer = null;
+    }
     const now = Date.now();
     while (launchTimes.length && launchTimes[0] <= now - dispatchWindow) launchTimes.shift();
 
-    while (launchQueue.length && launchTimes.length < dispatchLimit) {
+    while (launchQueue.length && launchTimes.length < dispatchLimit && runningCount < concurrencyLimit) {
       const id = /** @type {string} */ (launchQueue.shift());
       const task = tasks.get(id);
       if (!task || task.status !== "queued") continue;
@@ -615,8 +792,9 @@ export function createTaskManager({
     }
 
     if (launchQueue.length && !launchTimer) {
-      const delay = Math.max(1, launchTimes[0] + dispatchWindow - Date.now());
-      launchTimer = setTimeout(launchQueuedTasks, delay);
+      const rateDelay = launchTimes.length >= dispatchLimit ? launchTimes[0] + dispatchWindow - Date.now() : 0;
+      const concurrencyDelay = runningCount >= concurrencyLimit ? 250 : 0;
+      launchTimer = setTimeout(launchQueuedTasks, Math.max(1, rateDelay, concurrencyDelay));
     }
   }
 
@@ -649,26 +827,43 @@ export function createTaskManager({
       }
     };
 
-    /** @type {number|null} */
-    let logFd = null;
+    let logFd;
+    let child;
     try {
       logFd = fs.openSync(task.logPath, "a", 0o600);
       fs.chmodSync(task.logPath, 0o600);
       // No tmux: the child has no shared session to introspect. It is its own
       // process group so cancellation can stop any subprocesses it creates.
-      const child = spawnFn("opencode", args, {
+      const spawnEnv = isSummary ? summaryLaunch.env : dispatchEnvironment(dispatchLaunch.keyEnvValue);
+      child = spawnFn("opencode", args, {
         cwd: isSummary ? SUMMARY_DIR : dispatchLaunch.directory,
         stdio: ["ignore", logFd, logFd],
         detached: true,
-        ...(isSummary ? { env: summaryLaunch.env } : {}),
+        env: spawnEnv,
       });
       fs.closeSync(logFd);
       logFd = null;
-      task.status = "running";
-      task.pid = /** @type {number} */ (child.pid);
-      persist();
+      let settled = false;
+      const finishSettlement = () => {
+        try {
+          persistTask(task.id);
+        } catch {
+          // In-memory child settlement is authoritative; a failed best-effort
+          // state write must not strand the concurrency slot.
+        }
+        try {
+          cleanUpSnapshot();
+        } finally {
+          runningCount--;
+          settleWaiters(task.id);
+          launchQueuedTasks();
+        }
+      };
 
       child.on("exit", (code, signal) => {
+        stopRunningWatcher(task.id);
+        if (settled) return;
+        settled = true;
         const timer = escalationTimers.get(task.id);
         if (timer) {
           clearTimeout(timer);
@@ -680,27 +875,32 @@ export function createTaskManager({
         task.endedAt = new Date().toISOString();
         const parsedSessionId = readSessionIdFromLog(task.logPath);
         if (parsedSessionId) task.sessionId = parsedSessionId;
-        persist();
-        cleanUpSnapshot();
-        settleWaiters(task.id);
+        finishSettlement();
       });
 
       child.on("error", (err) => {
+        stopRunningWatcher(task.id);
+        if (settled) return;
+        settled = true;
         task.status = "crashed";
         task.spawnError = errMessage(err);
         task.endedAt = new Date().toISOString();
-        persist();
-        cleanUpSnapshot();
-        settleWaiters(task.id);
+        finishSettlement();
       });
 
+      task.status = "running";
+      task.pid = child.pid ?? null;
+      runningCount++;
+      persistTask(task.id);
+      startRunningWatcher(task);
       child.unref();
     } catch (err) {
       if (logFd != null) fs.closeSync(logFd);
       task.status = "crashed";
       task.spawnError = errMessage(err);
       task.endedAt = new Date().toISOString();
-      persist();
+      if (child?.pid != null) sendSignal(child.pid, "SIGKILL");
+      persistTask(task.id);
       cleanUpSnapshot();
       settleWaiters(task.id);
     }
@@ -729,7 +929,7 @@ export function createTaskManager({
       }
       task.status = "cancelled";
       task.endedAt = new Date().toISOString();
-      persist();
+      persistTask(task.id);
       settleWaiters(taskId);
       if (!launchQueue.length && launchTimer) {
         clearTimeout(launchTimer);
@@ -745,7 +945,16 @@ export function createTaskManager({
     }
 
     task.cancelRequested = true;
-    persist();
+    // Don't clobber a failureReason the watchdog already set (e.g. it fired
+    // provider_usage_exhausted just before this cancel() call arrived) --
+    // failureReason starts null at task creation, so leaving it alone here
+    // preserves that diagnostic instead of erasing it under "cancelled".
+    stopRunningWatcher(taskId);
+    const existingTimer = escalationTimers.get(taskId);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+      escalationTimers.delete(taskId);
+    }
     sendSignal(task.pid, "SIGTERM");
 
     const timer = setTimeout(() => {
@@ -755,8 +964,73 @@ export function createTaskManager({
       }
     }, graceMs);
     escalationTimers.set(taskId, timer);
+    persistTask(task.id);
 
     return { ...summarize(task), note: `SIGTERM sent to process group ${task.pid}; escalates to SIGKILL after ${graceMs}ms if it hasn't exited` };
+  }
+
+  /** @param {string} taskId */
+  function stopRunningWatcher(taskId) {
+    const timer = runningWatchers.get(taskId);
+    if (timer) {
+      clearInterval(timer);
+      runningWatchers.delete(taskId);
+    }
+  }
+
+  // Forces a running task to stop for a reason other than user cancellation
+  // (watchdog timeout, or provider-exhaustion detection added in Task 6).
+  // Mirrors cancel()'s SIGTERM-then-SIGKILL escalation, but records
+  // failureReason instead of cancelRequested so the exit handler's status
+  // computation (unchanged) still lands on "crashed", distinguishable from a
+  // user-requested "cancelled".
+  /**
+   * @param {Task} task
+   * @param {string} failureReason
+   */
+  function failRunningTask(task, failureReason) {
+    if (task.failureReason) return; // already stopping this task
+    task.failureReason = failureReason;
+    stopRunningWatcher(task.id);
+    sendSignal(/** @type {number} */ (task.pid), "SIGTERM");
+    const timer = setTimeout(() => {
+      escalationTimers.delete(task.id);
+      if (tasks.get(task.id)?.status === "running") sendSignal(/** @type {number} */ (task.pid), "SIGKILL");
+    }, WATCHDOG_KILL_GRACE_MS);
+    escalationTimers.set(task.id, timer);
+  }
+
+  /** @param {Task} task */
+  function startRunningWatcher(task) {
+    const startedAtMs = Date.now();
+    const timer = setInterval(() => {
+      const current = tasks.get(task.id);
+      if (!current || current.status !== "running") {
+        stopRunningWatcher(task.id);
+        return;
+      }
+      let raw;
+      try {
+        raw = fs.readFileSync(current.logPath, "utf8");
+      } catch {
+        raw = "";
+      }
+      if (raw && detectProviderExhaustion(raw)) {
+        failRunningTask(current, "provider_usage_exhausted");
+        return;
+      }
+      if (!raw.trim() && Date.now() - startedAtMs >= noOutputTimeout) {
+        failRunningTask(current, "no_output_timeout");
+      }
+    }, watchdogPoll);
+    // Same as child.unref() in startTask: the watchdog is a background
+    // observer, not something that should pin the server's event loop alive.
+    // An unref'd interval still fires while the loop is otherwise busy, but
+    // lets the process exit if nothing else (real work, child subprocesses,
+    // waiters) is keeping it alive -- e.g. tests that cancel a task without
+    // firing an 'exit' event.
+    timer.unref();
+    runningWatchers.set(task.id, timer);
   }
 
   // Targets the process group (negative pid), which reaches opencode and any
@@ -1104,7 +1378,7 @@ export function createTaskManager({
     if (!task) throw noSuchTask(taskId);
     if (fields != null) {
       if (!Array.isArray(fields) || !fields.length || fields.some((field) => !RESULT_FIELDS.has(field))) {
-        throw new Error("error: fields must contain one or more supported result fields\nhelp: use message, narration, tokens, cost, sessionId, exitCode, signal, spawnError, or logPath");
+        throw new Error("error: fields must contain one or more supported result fields\nhelp: use message, narration, tokens, cost, sessionId, exitCode, signal, spawnError, failureReason, keySlot, or logPath");
       }
       if (full && !fields.includes("narration")) {
         throw new Error("error: full requires narration in fields\nhelp: omit full or include narration in fields");
@@ -1187,6 +1461,8 @@ export function createTaskManager({
       exitCode: task.exitCode,
       signal: task.signal,
       spawnError: task.spawnError,
+      failureReason: task.failureReason ?? null,
+      keySlot: task.keySlot ?? null,
       sessionId,
       tokens,
       cost,

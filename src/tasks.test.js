@@ -13,7 +13,7 @@ import { createTaskManager } from "./tasks.js";
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, watchdogPollMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -33,6 +33,13 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     ...(maxDispatchesPerWindow != null ? { maxDispatchesPerWindow } : {}),
     ...(dispatchWindowMs != null ? { dispatchWindowMs } : {}),
     ...(advisorSessionTtlMs != null ? { advisorSessionTtlMs } : {}),
+    ...(maxConcurrentTasks != null ? { maxConcurrentTasks } : {}),
+    ...(noOutputTimeoutMs != null ? { noOutputTimeoutMs } : {}),
+    ...(watchdogPollMs != null ? { watchdogPollMs } : {}),
+    ...(keySlotsSpec != null ? { keySlotsSpec } : {}),
+    ...(providerKeyEnvName != null ? { providerKeyEnvName } : {}),
+    ...(summaryKeySlot != null ? { summaryKeySlot } : {}),
+    ...(summaryProviderKeyEnvName != null ? { summaryProviderKeyEnvName } : {}),
   });
 }
 
@@ -67,6 +74,39 @@ function baseTask(overrides = {}) {
     ...overrides,
   };
 }
+
+describe("persistTask() durability across concurrent manager instances", () => {
+  test("two manager instances writing concurrently both keep their own task record", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    const mgrA = createTaskManager({
+      stateDir,
+      spawnFn: () => fakeChild(1001),
+      killFn: () => { throw new Error("not used"); },
+    });
+    const mgrB = createTaskManager({
+      stateDir,
+      spawnFn: () => fakeChild(1002),
+      killFn: () => { throw new Error("not used"); },
+    });
+    const a = mgrA.dispatch({ prompt: "from A", directory: os.tmpdir() });
+    const b = mgrB.dispatch({ prompt: "from B", directory: os.tmpdir() });
+
+    const onDisk = JSON.parse(fs.readFileSync(path.join(stateDir, "tasks.json"), "utf8"));
+    const ids = onDisk.map((t) => t.id);
+    assert.ok(ids.includes(a.id), "manager A's task must survive manager B's write");
+    assert.ok(ids.includes(b.id), "manager B's task must survive manager A's write");
+  });
+
+  test("malformed tasks.json surfaces as a structured error instead of throwing at construction", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    fs.writeFileSync(path.join(stateDir, "tasks.json"), "{ not valid json");
+    const mgr = createTaskManager({ stateDir, spawnFn: () => fakeChild(), killFn: () => {} });
+    assert.throws(
+      () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir() }),
+      /error: could not read persisted task state/
+    );
+  });
+});
 
 describe("dispatch() input validation (throws before spawning anything)", () => {
   test("rejects a missing prompt", () => {
@@ -265,6 +305,210 @@ describe("dispatch queue", () => {
   });
 });
 
+describe("active-task concurrency cap (independent of the launch-rate window)", () => {
+  test("starts at most maxConcurrentTasks children; a 5th stays queued until one finishes", () => {
+    const children = [];
+    const mgr = makeManager({
+      spawnFn: () => {
+        const c = fakeChild(9000 + children.length);
+        children.push(c);
+        return c;
+      },
+      maxConcurrentTasks: 4,
+      maxDispatchesPerWindow: 10, // wide open, so only the concurrency cap is under test
+      dispatchWindowMs: 60000,
+    });
+    const dispatched = Array.from({ length: 5 }, (_, i) => mgr.dispatch({ prompt: `p${i}`, directory: os.tmpdir() }));
+    const statuses = () => dispatched.map((d) => mgr.status(d.id).status);
+    assert.deepEqual(statuses(), ["running", "running", "running", "running", "queued"]);
+
+    children[0].emit("exit", 0, null);
+    assert.deepEqual(statuses(), ["done", "running", "running", "running", "running"]);
+  });
+});
+
+describe("active-task concurrency cap (regressions)", () => {
+  test("a child that fires both 'error' and 'exit' only decrements runningCount once (no over-promotion of the queue)", () => {
+    // Dispatch concurrencyLimit + 2 so 2 tasks are initially queued. If the
+    // exit/error handlers double-settle (no `settled` guard), runningCount
+    // drops by 2 and launchQueuedTasks() runs twice in a row, promoting
+    // BOTH queued tasks. With the guard, only the first promotion happens
+    // and one task remains queued.
+    const children = [];
+    const mgr = makeManager({
+      spawnFn: () => {
+        const c = fakeChild(9100 + children.length);
+        children.push(c);
+        return c;
+      },
+      maxConcurrentTasks: 4,
+      maxDispatchesPerWindow: 10,
+      dispatchWindowMs: 60000,
+    });
+    const dispatched = Array.from({ length: 6 }, (_, i) => mgr.dispatch({ prompt: `p${i}`, directory: os.tmpdir() }));
+    const statusOf = (id) => mgr.status(id).status;
+    assert.equal(dispatched.filter((d) => statusOf(d.id) === "queued").length, 2);
+
+    // Double-settle children[0] synchronously: emit error first, then exit.
+    children[0].emit("error", new Error("spawn opencode ENOENT"));
+    children[0].emit("exit", 1, null);
+
+    // children[0] settled to "crashed" once (the error wins), and exactly ONE
+    // queued task was promoted to "running". The other still sits in
+    // "queued" -- the duplicate exit event did not free a second slot.
+    assert.equal(statusOf(dispatched[0].id), "crashed");
+    assert.equal(dispatched.filter((d) => statusOf(d.id) === "running").length, 4);
+    assert.equal(dispatched.filter((d) => statusOf(d.id) === "queued").length, 1);
+
+    // Drain the queue so the test process can exit: finishing any other
+    // running child promotes the last queued task and clears the retry
+    // timer that launchQueuedTasks scheduled to wait for a slot to free.
+    children[1].emit("exit", 0, null);
+  });
+
+  test("a persistence failure after spawn kills the child and releases its concurrency slot when it exits", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    const lockPath = path.join(stateDir, "tasks.lock");
+    const children = [];
+    const killCalls = [];
+    const mgr = createTaskManager({
+      stateDir,
+      maxConcurrentTasks: 1,
+      maxDispatchesPerWindow: 10,
+      dispatchWindowMs: 60000,
+      spawnFn: () => {
+        const child = fakeChild(9200 + children.length);
+        children.push(child);
+        if (children.length === 1) {
+          fs.mkdirSync(lockPath);
+          const oldMs = Date.now() / 1000 - 3600;
+          fs.utimesSync(lockPath, oldMs, oldMs);
+        }
+        return child;
+      },
+      killFn: (pid, signal) => killCalls.push({ pid, signal }),
+    });
+
+    assert.throws(
+      () => mgr.dispatch({ prompt: "first", directory: os.tmpdir() }),
+      /EISDIR|illegal operation on a directory/
+    );
+    assert.deepEqual(killCalls, [{ pid: -9200, signal: "SIGKILL" }]);
+
+    children[0].emit("exit", null, "SIGKILL");
+    fs.rmdirSync(lockPath);
+
+    const second = mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
+    assert.equal(second.status, "running");
+    assert.equal(children.length, 2);
+  });
+});
+
+describe("no-output watchdog", () => {
+  test("a running child with no parseable log event past the deadline is stopped and marked crashed with failureReason", async () => {
+    const child = fakeChild(7001);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 20,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    await new Promise((r) => setTimeout(r, 60));
+    assert.ok(killed.some((k) => k.signal === "SIGTERM"), "watchdog must SIGTERM the stuck child's process group");
+
+    child.emit("exit", null, "SIGTERM");
+    const s = mgr.status(dispatched.id);
+    assert.equal(s.status, "crashed");
+    assert.equal(s.failureReason, "no_output_timeout");
+    assert.deepEqual(mgr.result(dispatched.id, { fields: ["failureReason", "keySlot"] }), {
+      taskId: dispatched.id,
+      status: "crashed",
+      failureReason: "no_output_timeout",
+      keySlot: null,
+    });
+  });
+
+  test("a running child that writes a parseable log event before the deadline is left alone", async () => {
+    const child = fakeChild(7002);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 30,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(mgr.status(dispatched.id).logPath, JSON.stringify({ type: "text", part: { messageID: "m1", text: "working..." } }) + "\n");
+
+    await new Promise((r) => setTimeout(r, 60));
+    assert.deepEqual(killed, []);
+    assert.equal(mgr.status(dispatched.id).status, "running");
+
+    child.emit("exit", 0, null);
+    assert.equal(mgr.status(dispatched.id).failureReason, null);
+  });
+});
+
+describe("provider-usage-exhaustion detection", () => {
+  test("a rate-limit diagnostic in the log stops the child early with failureReason provider_usage_exhausted", async () => {
+    const child = fakeChild(7101);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 60000, // long enough that only exhaustion detection could trigger this
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n"
+    );
+
+    await new Promise((r) => setTimeout(r, 40));
+    assert.ok(killed.some((k) => k.signal === "SIGTERM"));
+
+    child.emit("exit", null, "SIGTERM");
+    assert.equal(mgr.status(dispatched.id).failureReason, "provider_usage_exhausted");
+  });
+
+  test("ordinary crash text is not misclassified as provider exhaustion", () => {
+    const child = fakeChild(7102);
+    const mgr = makeManager({ spawnFn: () => child, killFn: () => {} });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(mgr.status(dispatched.id).logPath, "TypeError: cannot read property 'x' of undefined\n");
+    child.emit("exit", 1, null);
+    assert.equal(mgr.status(dispatched.id).status, "crashed");
+    assert.equal(mgr.status(dispatched.id).failureReason, null);
+  });
+
+  test("a type:\"text\" narration event that legitimately mentions rate limits, quotas, or 429 is not misclassified as provider exhaustion (GLM-5.2 review finding)", async () => {
+    const child = fakeChild(7103);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 60000,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      [
+        JSON.stringify({ type: "text", part: { messageID: "m1", text: "I hit a 429 while testing the client, so I added quota and rate-limit backoff handling per the usage-limit spec." } }),
+        JSON.stringify({ type: "step_finish", part: { messageID: "m1", reason: "stop" } }),
+      ].join("\n") + "\n"
+    );
+
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(killed.length, 0);
+    assert.equal(mgr.status(dispatched.id).failureReason, null);
+  });
+});
+
 describe("cancel()", () => {
   test("sends SIGTERM to the negative pid (process group), then escalates to SIGKILL after graceMs if still running", async () => {
     const child = fakeChild(777);
@@ -290,6 +534,68 @@ describe("cancel()", () => {
 
     await new Promise((r) => setTimeout(r, 30));
     assert.deepEqual(killCalls, [{ pid: -888, signal: "SIGTERM" }]); // no SIGKILL follow-up
+  });
+
+  test("stops the watchdog so cancellation cannot add a failureReason before the child exits", async () => {
+    const child = fakeChild(889);
+    const killCalls = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killCalls.push({ pid, signal }),
+      noOutputTimeoutMs: 20,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    mgr.cancel(dispatched.id, { graceMs: 1000 });
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.equal(mgr.status(dispatched.id).failureReason, null);
+    assert.deepEqual(killCalls, [{ pid: -889, signal: "SIGTERM" }]);
+    child.emit("exit", null, "SIGTERM");
+    assert.equal(mgr.status(dispatched.id).status, "cancelled");
+  });
+
+  test("replaces an existing cancellation escalation timer", async () => {
+    const child = fakeChild(890);
+    const killCalls = [];
+    const mgr = makeManager({ spawnFn: () => child, killFn: (pid, signal) => killCalls.push({ pid, signal }) });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    mgr.cancel(dispatched.id, { graceMs: 15 });
+    mgr.cancel(dispatched.id, { graceMs: 100 });
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.deepEqual(killCalls, [
+      { pid: -890, signal: "SIGTERM" },
+      { pid: -890, signal: "SIGTERM" },
+    ]);
+    child.emit("exit", null, "SIGTERM");
+  });
+
+  test("signals and disables the watchdog even when cancellation persistence fails", async () => {
+    const child = fakeChild(891);
+    const killCalls = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killCalls.push({ pid, signal }),
+      noOutputTimeoutMs: 20,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const lockPath = path.join(path.dirname(mgr.paths.TASKS_FILE), "tasks.lock");
+    fs.mkdirSync(lockPath);
+    const oldMs = Date.now() / 1000 - 3600;
+    fs.utimesSync(lockPath, oldMs, oldMs);
+
+    assert.throws(() => mgr.cancel(dispatched.id, { graceMs: 1000 }), /EISDIR|illegal operation on a directory/);
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.deepEqual(killCalls, [{ pid: -891, signal: "SIGTERM" }]);
+    assert.equal(mgr.status(dispatched.id).failureReason, null);
+    fs.rmdirSync(lockPath);
+    child.emit("exit", null, "SIGTERM");
+    assert.equal(mgr.status(dispatched.id).status, "cancelled");
   });
 
   test("falls back to the plain pid if group signaling (-pid) raises ESRCH", () => {
@@ -470,7 +776,7 @@ describe("advisor()", () => {
     const child = fakeChild();
     let captured = null;
     const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => {
+      spawnFn: (cmd, args, _opts) => {
         captured = args;
         return child;
       },
@@ -964,5 +1270,136 @@ describe("summarize()", () => {
     assert.match(snapshot.narration, /TAIL_MARKER/);
     assert.match(snapshot.narration, /bytes omitted from source log/);
     child.emit("exit", 0, null);
+  });
+});
+
+describe("key slots (summary tasks)", () => {
+  test("a configured summary key slot is injected without exposing any key-slot source variables", async (t) => {
+    process.env.AXI_TEST_SUMMARY_PRIMARY = "sk-summary-secret";
+    process.env.AXI_TEST_SUMMARY_BACKUP = "sk-backup-secret";
+    t.after(() => {
+      delete process.env.AXI_TEST_SUMMARY_PRIMARY;
+      delete process.env.AXI_TEST_SUMMARY_BACKUP;
+    });
+    let capturedEnv = null;
+    let modelsEnv = null;
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, "src1.ndjson") }) }],
+      logs: { "src1.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the thing" } }) + "\n" },
+      spawnFn: (cmd, args, opts) => { capturedEnv = opts.env; return fakeChild(); },
+      listModelsFn: (env) => {
+        modelsEnv = env;
+        return "opencode-go/deepseek-v4-flash\n";
+      },
+      keySlotsSpec: "summary-slot:AXI_TEST_SUMMARY_PRIMARY,backup:AXI_TEST_SUMMARY_BACKUP",
+      summaryKeySlot: "summary-slot",
+      summaryProviderKeyEnvName: "DEEPSEEK_API_KEY",
+    });
+    await mgr.summarize("src1");
+    assert.equal(capturedEnv.DEEPSEEK_API_KEY, "sk-summary-secret");
+    assert.equal("AXI_TEST_SUMMARY_PRIMARY" in capturedEnv, false);
+    assert.equal("AXI_TEST_SUMMARY_BACKUP" in capturedEnv, false);
+    assert.equal(modelsEnv.DEEPSEEK_API_KEY, "sk-summary-secret");
+    assert.equal("AXI_TEST_SUMMARY_PRIMARY" in modelsEnv, false);
+    assert.equal("AXI_TEST_SUMMARY_BACKUP" in modelsEnv, false);
+  });
+
+  test("an unset summary key slot source variable fails the summary request before spawning", async () => {
+    delete process.env.AXI_TEST_SUMMARY_UNSET;
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, "src1.ndjson") }) }],
+      logs: { "src1.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the thing" } }) + "\n" },
+      spawnFn: () => { throw new Error("must not spawn"); },
+      keySlotsSpec: "summary-slot:AXI_TEST_SUMMARY_UNSET",
+      summaryKeySlot: "summary-slot",
+      summaryProviderKeyEnvName: "DEEPSEEK_API_KEY",
+    });
+    await assert.rejects(() => mgr.summarize("src1"), /error: summary key slot "summary-slot" source variable AXI_TEST_SUMMARY_UNSET is not set/);
+  });
+});
+
+describe("key slots (dispatch)", () => {
+  test("dispatch with an unconfigured key_slot throws before spawning anything", () => {
+    const mgr = makeManager({ spawnFn: () => { throw new Error("must not spawn"); } });
+    assert.throws(
+      () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), keySlot: "primary" }),
+      /error: key_slot given but TASKFERRY_PROVIDER_KEY_ENV is not configured/
+    );
+  });
+
+  test("dispatch with a key_slot name not in the registry throws before spawning anything", () => {
+    const mgr = makeManager({
+      spawnFn: () => { throw new Error("must not spawn"); },
+      keySlotsSpec: "primary:SOME_SOURCE_VAR",
+      providerKeyEnvName: "OPENCODE_GO_API_KEY",
+    });
+    assert.throws(
+      () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), keySlot: "backup" }),
+      /error: unknown key_slot: backup/
+    );
+  });
+
+  test("dispatch with a configured key_slot whose source env var is unset throws before spawning anything", () => {
+    delete process.env.AXI_TEST_UNSET_KEY_SOURCE;
+    const mgr = makeManager({
+      spawnFn: () => { throw new Error("must not spawn"); },
+      keySlotsSpec: "primary:AXI_TEST_UNSET_KEY_SOURCE",
+      providerKeyEnvName: "OPENCODE_GO_API_KEY",
+    });
+    assert.throws(
+      () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), keySlot: "primary" }),
+      /error: key_slot "primary" source variable AXI_TEST_UNSET_KEY_SOURCE is not set/
+    );
+  });
+
+  test("a valid key_slot passes only the configured target env var to the spawned child, and only the slot name is persisted", (t) => {
+    process.env.AXI_TEST_KEY_PRIMARY = "sk-super-secret-value";
+    process.env.AXI_TEST_KEY_BACKUP = "sk-backup-secret-value";
+    t.after(() => {
+      delete process.env.AXI_TEST_KEY_PRIMARY;
+      delete process.env.AXI_TEST_KEY_BACKUP;
+    });
+    let capturedOpts = null;
+    const child = fakeChild();
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return child; },
+      keySlotsSpec: "primary:AXI_TEST_KEY_PRIMARY,backup:AXI_TEST_KEY_BACKUP",
+      providerKeyEnvName: "OPENCODE_GO_API_KEY",
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), keySlot: "primary" });
+    assert.equal(dispatched.keySlot, "primary");
+    assert.equal(capturedOpts.env.OPENCODE_GO_API_KEY, "sk-super-secret-value");
+    assert.equal("AXI_TEST_KEY_PRIMARY" in capturedOpts.env, false);
+    assert.equal("AXI_TEST_KEY_BACKUP" in capturedOpts.env, false);
+
+    const onDisk = fs.readFileSync(mgr.paths.TASKS_FILE, "utf8");
+    assert.ok(!onDisk.includes("sk-super-secret-value"), "the raw key value must never reach tasks.json");
+    assert.ok(!onDisk.includes("sk-backup-secret-value"), "other raw key values must never reach tasks.json");
+    assert.ok(onDisk.includes('"keySlot": "primary"'));
+
+    child.emit("exit", 0, null);
+    assert.equal(mgr.result(dispatched.id).keySlot, "primary");
+  });
+
+  test("dispatch without key_slot still strips every configured source variable", (t) => {
+    process.env.AXI_TEST_KEY_PRIMARY = "sk-primary-secret-value";
+    process.env.AXI_TEST_KEY_BACKUP = "sk-backup-secret-value";
+    t.after(() => {
+      delete process.env.AXI_TEST_KEY_PRIMARY;
+      delete process.env.AXI_TEST_KEY_BACKUP;
+    });
+    let capturedOpts = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      keySlotsSpec: "primary:AXI_TEST_KEY_PRIMARY,backup:AXI_TEST_KEY_BACKUP",
+      providerKeyEnvName: "OPENCODE_GO_API_KEY",
+    });
+
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    assert.ok(capturedOpts.env);
+    assert.equal("AXI_TEST_KEY_PRIMARY" in capturedOpts.env, false);
+    assert.equal("AXI_TEST_KEY_BACKUP" in capturedOpts.env, false);
+    assert.equal("OPENCODE_GO_API_KEY" in capturedOpts.env, false);
   });
 });
