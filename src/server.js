@@ -267,7 +267,7 @@ server.registerTool(
         .optional()
         .describe("Include narration, untruncated, alongside the default fields. Defaults to false."),
       fields: z
-        .array(z.enum(["message", "narration", "tokens", "cost", "sessionId", "exitCode", "signal", "spawnError", "logPath"]))
+        .array(z.enum(["message", "narration", "tokens", "cost", "sessionId", "exitCode", "signal", "spawnError", "failureReason", "keySlot", "logPath"]))
         .min(1)
         .optional()
         .describe("Return only these result fields, plus taskId and status. Omit for the default result (message and metadata, no narration)."),

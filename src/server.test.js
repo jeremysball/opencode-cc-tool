@@ -59,6 +59,8 @@ test("registers summary and tail tools with schemas and returns projected TOON d
     assert.equal(byName.get("taskferry_summary").inputSchema.properties.max_words.minimum, 75);
     assert.equal(byName.get("taskferry_summary").inputSchema.properties.max_words.maximum, 300);
     assert.equal(byName.get("taskferry_result").inputSchema.properties.fields.minItems, 1);
+    assert.ok(byName.get("taskferry_result").inputSchema.properties.fields.items.enum.includes("failureReason"));
+    assert.ok(byName.get("taskferry_result").inputSchema.properties.fields.items.enum.includes("keySlot"));
     assert.equal(byName.has("taskferry_advisor"), true);
     assert.equal(byName.get("taskferry_advisor").inputSchema.properties.model.type, "string");
     assert.equal(byName.get("taskferry_advisor").inputSchema.required.includes("model"), true);

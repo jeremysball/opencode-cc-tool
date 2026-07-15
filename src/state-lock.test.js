@@ -43,4 +43,16 @@ describe("withFileLock()", () => {
     );
     fs.unlinkSync(lockPath); // test-owned cleanup; withFileLock never acquired it
   });
+
+  test("does not remove a lock file that was replaced by another owner", () => {
+    const lockPath = tmpLockPath();
+
+    withFileLock(lockPath, () => {
+      fs.unlinkSync(lockPath);
+      fs.writeFileSync(lockPath, "replacement-owner", { mode: 0o600 });
+    });
+
+    assert.equal(fs.readFileSync(lockPath, "utf8"), "replacement-owner");
+    fs.unlinkSync(lockPath);
+  });
 });

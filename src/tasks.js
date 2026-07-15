@@ -123,7 +123,7 @@ const SUMMARY_INPUT_BYTES = 96 * 1024;
 const SUMMARY_MODEL = process.env.TASKFERRY_SUMMARY_MODEL || "opencode-go/deepseek-v4-flash";
 const SUMMARY_AGENT = "taskferry-summary";
 const SUMMARY_PREFLIGHT_TIMEOUT_MS = 10000;
-const RESULT_FIELDS = new Set(["message", "narration", "tokens", "cost", "sessionId", "exitCode", "signal", "spawnError", "logPath"]);
+const RESULT_FIELDS = new Set(["message", "narration", "tokens", "cost", "sessionId", "exitCode", "signal", "spawnError", "failureReason", "keySlot", "logPath"]);
 const execFileAsync = promisify(execFile);
 
 const PROVIDER_EXHAUSTION_PATTERNS = [
@@ -247,7 +247,7 @@ const WATCHDOG_KILL_GRACE_MS = 5000;
 export function createTaskManager({
   spawnFn = spawn,
   killFn = (pid, signal) => process.kill(pid, signal),
-  listModelsFn = async () => (await execFileAsync("opencode", ["models"], { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS })).stdout,
+  listModelsFn = async (env) => (await execFileAsync("opencode", ["models"], { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS, env })).stdout,
   verifySummaryAgentFn = async (env) => {
     const { stdout, stderr } = await execFileAsync(
       "opencode",
@@ -282,8 +282,20 @@ export function createTaskManager({
   const watchdogPoll = positiveInteger(watchdogPollMs, DEFAULT_WATCHDOG_POLL_MS);
   const keySlots = parseKeySlots(keySlotsSpec);
 
-  function summaryEnvironment() {
+  function environmentWithoutKeySlotSources() {
     const env = { ...process.env };
+    for (const sourceEnvVar of keySlots.values()) delete env[sourceEnvVar];
+    return env;
+  }
+
+  function dispatchEnvironment(keyEnvValue) {
+    const env = environmentWithoutKeySlotSources();
+    if (keyEnvValue != null && providerKeyEnvName) env[providerKeyEnvName] = keyEnvValue;
+    return env;
+  }
+
+  function summaryEnvironment() {
+    const env = environmentWithoutKeySlotSources();
     delete env.OPENCODE_CONFIG;
     delete env.OPENCODE_CONFIG_DIR;
     delete env.OPENCODE_CONFIG_CONTENT;
@@ -561,10 +573,10 @@ export function createTaskManager({
   }
 
   /** @param {string} model */
-  async function summaryModelAvailable(model) {
+  async function summaryModelAvailable(model, env) {
     if (Date.now() >= modelsCache.expiresAt) {
       try {
-        modelsCache = { expiresAt: Date.now() + 5 * 60 * 1000, output: await listModelsFn() };
+        modelsCache = { expiresAt: Date.now() + 5 * 60 * 1000, output: await listModelsFn(env) };
       } catch (err) {
         throw new Error(`error: could not list available OpenCode models: ${errMessage(err)}\nhelp: verify that opencode is installed and authenticated, then retry taskferry_summary`, { cause: err });
       }
@@ -669,7 +681,7 @@ export function createTaskManager({
       };
     }
     const env = summaryEnvironment();
-    await Promise.all([summaryModelAvailable(SUMMARY_MODEL), verifySummaryAgent(env)]);
+    await Promise.all([summaryModelAvailable(SUMMARY_MODEL, env), verifySummaryAgent(env)]);
 
     const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
     const logPath = path.join(LOG_DIR, `${id}.ndjson`);
@@ -777,32 +789,38 @@ export function createTaskManager({
       }
     };
 
-    /** @type {number|null} */
-    let logFd = null;
+    let logFd;
+    let child;
     try {
       logFd = fs.openSync(task.logPath, "a", 0o600);
       fs.chmodSync(task.logPath, 0o600);
       // No tmux: the child has no shared session to introspect. It is its own
       // process group so cancellation can stop any subprocesses it creates.
-      const spawnEnv = isSummary
-        ? launch.env
-        : launch.keyEnvValue != null
-          ? { ...process.env, [providerKeyEnvName]: launch.keyEnvValue }
-          : undefined;
-      const child = spawnFn("opencode", args, {
-        cwd: isSummary ? SUMMARY_DIR : dispatchLaunch.directory,
+      const spawnEnv = isSummary ? launch.env : dispatchEnvironment(launch.keyEnvValue);
+      child = spawnFn("opencode", args, {
+        cwd: isSummary ? SUMMARY_DIR : launch.directory,
         stdio: ["ignore", logFd, logFd],
         detached: true,
-        ...(spawnEnv ? { env: spawnEnv } : {}),
+        env: spawnEnv,
       });
       fs.closeSync(logFd);
       logFd = null;
       let settled = false;
-      task.status = "running";
-      task.pid = /** @type {number} */ (child.pid);
-      runningCount++;
-      persistTask(task.id);
-      startRunningWatcher(task);
+      const finishSettlement = () => {
+        try {
+          persistTask(task.id);
+        } catch {
+          // In-memory child settlement is authoritative; a failed best-effort
+          // state write must not strand the concurrency slot.
+        }
+        try {
+          cleanUpSnapshot();
+        } finally {
+          runningCount--;
+          settleWaiters(task.id);
+          launchQueuedTasks();
+        }
+      };
 
       child.on("exit", (code, signal) => {
         stopRunningWatcher(task.id);
@@ -819,11 +837,7 @@ export function createTaskManager({
         task.endedAt = new Date().toISOString();
         const parsedSessionId = readSessionIdFromLog(task.logPath);
         if (parsedSessionId) task.sessionId = parsedSessionId;
-        persistTask(task.id);
-        cleanUpSnapshot();
-        runningCount--;
-        settleWaiters(task.id);
-        launchQueuedTasks();
+        finishSettlement();
       });
 
       child.on("error", (err) => {
@@ -833,19 +847,21 @@ export function createTaskManager({
         task.status = "crashed";
         task.spawnError = errMessage(err);
         task.endedAt = new Date().toISOString();
-        persistTask(task.id);
-        cleanUpSnapshot();
-        runningCount--;
-        settleWaiters(task.id);
-        launchQueuedTasks();
+        finishSettlement();
       });
 
+      task.status = "running";
+      task.pid = child.pid;
+      runningCount++;
+      persistTask(task.id);
+      startRunningWatcher(task);
       child.unref();
     } catch (err) {
       if (logFd != null) fs.closeSync(logFd);
       task.status = "crashed";
       task.spawnError = errMessage(err);
       task.endedAt = new Date().toISOString();
+      if (child?.pid != null) sendSignal(child.pid, "SIGKILL");
       persistTask(task.id);
       cleanUpSnapshot();
       settleWaiters(task.id);
@@ -891,7 +907,13 @@ export function createTaskManager({
     }
 
     task.cancelRequested = true;
-    persistTask(task.id);
+    task.failureReason = null;
+    stopRunningWatcher(taskId);
+    const existingTimer = escalationTimers.get(taskId);
+    if (existingTimer) {
+      clearTimeout(existingTimer);
+      escalationTimers.delete(taskId);
+    }
     sendSignal(task.pid, "SIGTERM");
 
     const timer = setTimeout(() => {
@@ -901,6 +923,7 @@ export function createTaskManager({
       }
     }, graceMs);
     escalationTimers.set(taskId, timer);
+    persistTask(task.id);
 
     return { ...summarize(task), note: `SIGTERM sent to process group ${task.pid}; escalates to SIGKILL after ${graceMs}ms if it hasn't exited` };
   }
@@ -1308,7 +1331,7 @@ export function createTaskManager({
     if (!task) throw noSuchTask(taskId);
     if (fields != null) {
       if (!Array.isArray(fields) || !fields.length || fields.some((field) => !RESULT_FIELDS.has(field))) {
-        throw new Error("error: fields must contain one or more supported result fields\nhelp: use message, narration, tokens, cost, sessionId, exitCode, signal, spawnError, or logPath");
+        throw new Error("error: fields must contain one or more supported result fields\nhelp: use message, narration, tokens, cost, sessionId, exitCode, signal, spawnError, failureReason, keySlot, or logPath");
       }
       if (full && !fields.includes("narration")) {
         throw new Error("error: full requires narration in fields\nhelp: omit full or include narration in fields");
@@ -1391,6 +1414,8 @@ export function createTaskManager({
       exitCode: task.exitCode,
       signal: task.signal,
       spawnError: task.spawnError,
+      failureReason: task.failureReason ?? null,
+      keySlot: task.keySlot ?? null,
       sessionId,
       tokens,
       cost,

@@ -365,6 +365,43 @@ describe("active-task concurrency cap (regressions)", () => {
     // timer that launchQueuedTasks scheduled to wait for a slot to free.
     children[1].emit("exit", 0, null);
   });
+
+  test("a persistence failure after spawn kills the child and releases its concurrency slot when it exits", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    const lockPath = path.join(stateDir, "tasks.lock");
+    const children = [];
+    const killCalls = [];
+    const mgr = createTaskManager({
+      stateDir,
+      maxConcurrentTasks: 1,
+      maxDispatchesPerWindow: 10,
+      dispatchWindowMs: 60000,
+      spawnFn: () => {
+        const child = fakeChild(9200 + children.length);
+        children.push(child);
+        if (children.length === 1) {
+          fs.mkdirSync(lockPath);
+          const oldMs = Date.now() / 1000 - 3600;
+          fs.utimesSync(lockPath, oldMs, oldMs);
+        }
+        return child;
+      },
+      killFn: (pid, signal) => killCalls.push({ pid, signal }),
+    });
+
+    assert.throws(
+      () => mgr.dispatch({ prompt: "first", directory: os.tmpdir() }),
+      /EISDIR|illegal operation on a directory/
+    );
+    assert.deepEqual(killCalls, [{ pid: -9200, signal: "SIGKILL" }]);
+
+    children[0].emit("exit", null, "SIGKILL");
+    fs.rmdirSync(lockPath);
+
+    const second = mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
+    assert.equal(second.status, "running");
+    assert.equal(children.length, 2);
+  });
 });
 
 describe("no-output watchdog", () => {
@@ -386,6 +423,12 @@ describe("no-output watchdog", () => {
     const s = mgr.status(dispatched.id);
     assert.equal(s.status, "crashed");
     assert.equal(s.failureReason, "no_output_timeout");
+    assert.deepEqual(mgr.result(dispatched.id, { fields: ["failureReason", "keySlot"] }), {
+      taskId: dispatched.id,
+      status: "crashed",
+      failureReason: "no_output_timeout",
+      keySlot: null,
+    });
   });
 
   test("a running child that writes a parseable log event before the deadline is left alone", async () => {
@@ -468,6 +511,68 @@ describe("cancel()", () => {
 
     await new Promise((r) => setTimeout(r, 30));
     assert.deepEqual(killCalls, [{ pid: -888, signal: "SIGTERM" }]); // no SIGKILL follow-up
+  });
+
+  test("stops the watchdog so cancellation cannot add a failureReason before the child exits", async () => {
+    const child = fakeChild(889);
+    const killCalls = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killCalls.push({ pid, signal }),
+      noOutputTimeoutMs: 20,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    mgr.cancel(dispatched.id, { graceMs: 1000 });
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.equal(mgr.status(dispatched.id).failureReason, null);
+    assert.deepEqual(killCalls, [{ pid: -889, signal: "SIGTERM" }]);
+    child.emit("exit", null, "SIGTERM");
+    assert.equal(mgr.status(dispatched.id).status, "cancelled");
+  });
+
+  test("replaces an existing cancellation escalation timer", async () => {
+    const child = fakeChild(890);
+    const killCalls = [];
+    const mgr = makeManager({ spawnFn: () => child, killFn: (pid, signal) => killCalls.push({ pid, signal }) });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    mgr.cancel(dispatched.id, { graceMs: 15 });
+    mgr.cancel(dispatched.id, { graceMs: 100 });
+    await new Promise((r) => setTimeout(r, 30));
+
+    assert.deepEqual(killCalls, [
+      { pid: -890, signal: "SIGTERM" },
+      { pid: -890, signal: "SIGTERM" },
+    ]);
+    child.emit("exit", null, "SIGTERM");
+  });
+
+  test("signals and disables the watchdog even when cancellation persistence fails", async () => {
+    const child = fakeChild(891);
+    const killCalls = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killCalls.push({ pid, signal }),
+      noOutputTimeoutMs: 20,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const lockPath = path.join(path.dirname(mgr.paths.TASKS_FILE), "tasks.lock");
+    fs.mkdirSync(lockPath);
+    const oldMs = Date.now() / 1000 - 3600;
+    fs.utimesSync(lockPath, oldMs, oldMs);
+
+    assert.throws(() => mgr.cancel(dispatched.id, { graceMs: 1000 }), /EISDIR|illegal operation on a directory/);
+    await new Promise((r) => setTimeout(r, 50));
+
+    assert.deepEqual(killCalls, [{ pid: -891, signal: "SIGTERM" }]);
+    assert.equal(mgr.status(dispatched.id).failureReason, null);
+    fs.rmdirSync(lockPath);
+    child.emit("exit", null, "SIGTERM");
+    assert.equal(mgr.status(dispatched.id).status, "cancelled");
   });
 
   test("falls back to the plain pid if group signaling (-pid) raises ESRCH", () => {
@@ -1146,20 +1251,34 @@ describe("summarize()", () => {
 });
 
 describe("key slots (summary tasks)", () => {
-  test("a configured summary key slot is injected into the summary child's env, independent of the source task's own key_slot", async () => {
-    process.env.AXI_TEST_SUMMARY_SOURCE = "sk-summary-secret";
+  test("a configured summary key slot is injected without exposing any key-slot source variables", async (t) => {
+    process.env.AXI_TEST_SUMMARY_PRIMARY = "sk-summary-secret";
+    process.env.AXI_TEST_SUMMARY_BACKUP = "sk-backup-secret";
+    t.after(() => {
+      delete process.env.AXI_TEST_SUMMARY_PRIMARY;
+      delete process.env.AXI_TEST_SUMMARY_BACKUP;
+    });
     let capturedEnv = null;
+    let modelsEnv = null;
     const mgr = makeManager({
       tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, "src1.ndjson") }) }],
       logs: { "src1.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the thing" } }) + "\n" },
       spawnFn: (cmd, args, opts) => { capturedEnv = opts.env; return fakeChild(); },
-      keySlotsSpec: "summary-slot:AXI_TEST_SUMMARY_SOURCE",
+      listModelsFn: (env) => {
+        modelsEnv = env;
+        return "opencode-go/deepseek-v4-flash\n";
+      },
+      keySlotsSpec: "summary-slot:AXI_TEST_SUMMARY_PRIMARY,backup:AXI_TEST_SUMMARY_BACKUP",
       summaryKeySlot: "summary-slot",
       summaryProviderKeyEnvName: "DEEPSEEK_API_KEY",
     });
     await mgr.summarize("src1");
     assert.equal(capturedEnv.DEEPSEEK_API_KEY, "sk-summary-secret");
-    delete process.env.AXI_TEST_SUMMARY_SOURCE;
+    assert.equal("AXI_TEST_SUMMARY_PRIMARY" in capturedEnv, false);
+    assert.equal("AXI_TEST_SUMMARY_BACKUP" in capturedEnv, false);
+    assert.equal(modelsEnv.DEEPSEEK_API_KEY, "sk-summary-secret");
+    assert.equal("AXI_TEST_SUMMARY_PRIMARY" in modelsEnv, false);
+    assert.equal("AXI_TEST_SUMMARY_BACKUP" in modelsEnv, false);
   });
 
   test("an unset summary key slot source variable fails the summary request before spawning", async () => {
@@ -1210,21 +1329,54 @@ describe("key slots (dispatch)", () => {
     );
   });
 
-  test("a valid key_slot passes only the configured target env var to the spawned child, and only the slot name is persisted", () => {
-    process.env.AXI_TEST_KEY_SOURCE = "sk-super-secret-value";
+  test("a valid key_slot passes only the configured target env var to the spawned child, and only the slot name is persisted", (t) => {
+    process.env.AXI_TEST_KEY_PRIMARY = "sk-super-secret-value";
+    process.env.AXI_TEST_KEY_BACKUP = "sk-backup-secret-value";
+    t.after(() => {
+      delete process.env.AXI_TEST_KEY_PRIMARY;
+      delete process.env.AXI_TEST_KEY_BACKUP;
+    });
     let capturedOpts = null;
+    const child = fakeChild();
     const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
-      keySlotsSpec: "primary:AXI_TEST_KEY_SOURCE,backup:AXI_TEST_KEY_SOURCE",
+      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return child; },
+      keySlotsSpec: "primary:AXI_TEST_KEY_PRIMARY,backup:AXI_TEST_KEY_BACKUP",
       providerKeyEnvName: "OPENCODE_GO_API_KEY",
     });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), keySlot: "primary" });
     assert.equal(dispatched.keySlot, "primary");
     assert.equal(capturedOpts.env.OPENCODE_GO_API_KEY, "sk-super-secret-value");
+    assert.equal("AXI_TEST_KEY_PRIMARY" in capturedOpts.env, false);
+    assert.equal("AXI_TEST_KEY_BACKUP" in capturedOpts.env, false);
 
     const onDisk = fs.readFileSync(mgr.paths.TASKS_FILE, "utf8");
     assert.ok(!onDisk.includes("sk-super-secret-value"), "the raw key value must never reach tasks.json");
+    assert.ok(!onDisk.includes("sk-backup-secret-value"), "other raw key values must never reach tasks.json");
     assert.ok(onDisk.includes('"keySlot": "primary"'));
-    delete process.env.AXI_TEST_KEY_SOURCE;
+
+    child.emit("exit", 0, null);
+    assert.equal(mgr.result(dispatched.id).keySlot, "primary");
+  });
+
+  test("dispatch without key_slot still strips every configured source variable", (t) => {
+    process.env.AXI_TEST_KEY_PRIMARY = "sk-primary-secret-value";
+    process.env.AXI_TEST_KEY_BACKUP = "sk-backup-secret-value";
+    t.after(() => {
+      delete process.env.AXI_TEST_KEY_PRIMARY;
+      delete process.env.AXI_TEST_KEY_BACKUP;
+    });
+    let capturedOpts = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { capturedOpts = opts; return fakeChild(); },
+      keySlotsSpec: "primary:AXI_TEST_KEY_PRIMARY,backup:AXI_TEST_KEY_BACKUP",
+      providerKeyEnvName: "OPENCODE_GO_API_KEY",
+    });
+
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    assert.ok(capturedOpts.env);
+    assert.equal("AXI_TEST_KEY_PRIMARY" in capturedOpts.env, false);
+    assert.equal("AXI_TEST_KEY_BACKUP" in capturedOpts.env, false);
+    assert.equal("OPENCODE_GO_API_KEY" in capturedOpts.env, false);
   });
 });

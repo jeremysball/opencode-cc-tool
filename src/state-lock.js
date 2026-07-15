@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { randomUUID } from "node:crypto";
 
 // A synchronous, cross-process exclusive lock backed by an exclusively-created
 // file. Blocks the event loop via Atomics.wait while contended -- acceptable
@@ -7,9 +8,10 @@ import fs from "node:fs";
 // single small JSON read-modify-write.
 export function withFileLock(lockPath, fn, { staleMs = 10000, retryMs = 25, timeoutMs = 5000 } = {}) {
   const deadline = Date.now() + timeoutMs;
+  const ownershipToken = `${process.pid}-${Date.now()}-${randomUUID()}`;
   for (;;) {
     try {
-      fs.closeSync(fs.openSync(lockPath, "wx", 0o600));
+      fs.writeFileSync(lockPath, ownershipToken, { flag: "wx", mode: 0o600 });
       break;
     } catch (err) {
       if (err.code !== "EEXIST") throw err;
@@ -37,10 +39,18 @@ export function withFileLock(lockPath, fn, { staleMs = 10000, retryMs = 25, time
   try {
     return fn();
   } finally {
+    let currentToken;
     try {
-      fs.unlinkSync(lockPath);
+      currentToken = fs.readFileSync(lockPath, "utf8");
     } catch (err) {
       if (err.code !== "ENOENT") throw err;
+    }
+    if (currentToken === ownershipToken) {
+      try {
+        fs.unlinkSync(lockPath);
+      } catch (err) {
+        if (err.code !== "ENOENT") throw err;
+      }
     }
   }
 }
