@@ -36,6 +36,23 @@ function makeStateDir() {
     promptTotalChars: null,
     spawnError: null,
     cancelRequested: false,
+  }, {
+    id: "empty",
+    status: "done",
+    directory: os.tmpdir(),
+    model: "openai/gpt-5.6-luna",
+    variant: "high",
+    sessionId: null,
+    pid: null,
+    startedAt: "2026-07-14T00:00:00.000Z",
+    endedAt: "2026-07-14T00:01:00.000Z",
+    exitCode: 0,
+    signal: null,
+    logPath: path.join(logDir, "empty.ndjson"),
+    promptPreview: "test",
+    promptTotalChars: null,
+    spawnError: null,
+    cancelRequested: false,
   }]));
   return stateDir;
 }
@@ -81,6 +98,24 @@ test("registers summary and tail tools with schemas and returns projected TOON d
       taskId: "done",
       status: "done",
       message: "latest text",
+    });
+
+    const emptyResult = await client.callTool({ name: "taskferry_result", arguments: { task_id: "empty" } });
+    assert.deepEqual(decode(emptyResult.content[0].text), {
+      taskId: "empty",
+      status: "done",
+      message: "",
+      narrationTotalChars: 0,
+      exitCode: 0,
+      signal: null,
+      spawnError: null,
+      failureReason: null,
+      keySlot: null,
+      sessionId: null,
+      tokens: null,
+      cost: null,
+      logPath: path.join(stateDir, "logs", "empty.ndjson"),
+      next: "Run taskferry_result with full: true, or fields including narration, on task_id \"empty\" to see intermediate step narration (0 chars total)",
     });
   } finally {
     await client.close();

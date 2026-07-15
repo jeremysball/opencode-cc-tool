@@ -62,7 +62,7 @@ function leanStatus(detail, { full = false } = {}) {
  * @returns {ResultDetail}
  */
 function leanResult(detail, { full = false, fields } = {}) {
-  if (full || fields || !detail.narrationTotalChars) return detail;
+  if (full || fields) return detail;
   const { narration: _narration, narrationTruncated: _narrationTruncated, ...rest } = detail;
   return {
     ...rest,

@@ -1004,6 +1004,11 @@ export function createTaskManager({
     if (task.failureReason) return; // already stopping this task
     task.failureReason = failureReason;
     stopRunningWatcher(task.id);
+    try {
+      persistTask(task.id);
+    } catch {
+      // The child still needs stopping if the state directory became unwritable.
+    }
     sendSignal(/** @type {number} */ (task.pid), "SIGTERM");
     const timer = setTimeout(() => {
       escalationTimers.delete(task.id);
@@ -1028,35 +1033,43 @@ export function createTaskManager({
         stopRunningWatcher(task.id);
         return;
       }
-      let size;
       try {
-        size = fs.statSync(current.logPath).size;
+        const size = fs.statSync(current.logPath).size;
+        if (size < bytesRead) {
+          // Log shrank or was replaced out from under us; rescan from scratch.
+          bytesRead = 0;
+          carry = "";
+        }
+        if (size > bytesRead) {
+          const chunkSize = size - bytesRead;
+          const buf = Buffer.alloc(chunkSize);
+          const fd = fs.openSync(current.logPath, "r");
+          try {
+            fs.readSync(fd, buf, 0, chunkSize, bytesRead);
+          } finally {
+            fs.closeSync(fd);
+          }
+          bytesRead = size;
+          const text = carry + buf.toString("utf8");
+          const lines = text.split("\n");
+          carry = lines.pop() ?? "";
+          if (detectProviderExhaustion(lines) || (carry && !carry.trimStart().startsWith("{") && detectProviderExhaustion([carry]))) {
+            failRunningTask(current, "provider_usage_exhausted");
+            return;
+          }
+          if (lines.some((line) => {
+            try {
+              JSON.parse(line);
+              return true;
+            } catch {
+              return false;
+            }
+          })) {
+            lastActivityMs = Date.now();
+          }
+        }
       } catch {
-        size = 0;
-      }
-      if (size < bytesRead) {
-        // Log shrank or was replaced out from under us; rescan from scratch.
-        bytesRead = 0;
-        carry = "";
-      }
-      if (size > bytesRead) {
-        const chunkSize = size - bytesRead;
-        const buf = Buffer.alloc(chunkSize);
-        const fd = fs.openSync(current.logPath, "r");
-        try {
-          fs.readSync(fd, buf, 0, chunkSize, bytesRead);
-        } finally {
-          fs.closeSync(fd);
-        }
-        bytesRead = size;
-        lastActivityMs = Date.now();
-        const text = carry + buf.toString("utf8");
-        const lines = text.split("\n");
-        carry = lines.pop() ?? "";
-        if (detectProviderExhaustion(lines)) {
-          failRunningTask(current, "provider_usage_exhausted");
-          return;
-        }
+        // A rotated or removed log is retried on the next watcher tick.
       }
       if (Date.now() - lastActivityMs >= noOutputTimeout) {
         failRunningTask(current, "no_output_timeout");
