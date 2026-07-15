@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { promisify } from "node:util";
+import { createTaskEvents } from "./events.js";
 import { withFileLock } from "./state-lock.js";
 
 /**
@@ -34,6 +35,7 @@ import { withFileLock } from "./state-lock.js";
  * @property {number|null} promptTotalChars
  * @property {string|null} spawnError
  * @property {boolean} cancelRequested
+ * @property {boolean} internal
  * @property {string|null} [failureReason]
  * @property {string|null} [keySlot]
  * @property {SummaryOf} [summaryOf]
@@ -268,6 +270,7 @@ const WATCHDOG_KILL_GRACE_MS = 5000;
  * @param {string|null} [options.providerKeyEnvName]
  * @param {string|null} [options.summaryKeySlot]
  * @param {string|null} [options.summaryProviderKeyEnvName]
+ * @param {(event: object) => void} [options.onEvent]
  */
 // Factory rather than a module-level singleton, so tests can construct an
 // isolated instance with an injected spawnFn/killFn (no real `opencode`
@@ -299,6 +302,7 @@ export function createTaskManager({
   providerKeyEnvName = process.env.TASKFERRY_PROVIDER_KEY_ENV || null,
   summaryKeySlot = process.env.TASKFERRY_SUMMARY_KEY_SLOT || null,
   summaryProviderKeyEnvName = process.env.TASKFERRY_SUMMARY_PROVIDER_KEY_ENV || null,
+  onEvent,
 } = {}) {
   const LOG_DIR = path.join(stateDir, "logs");
   const SUMMARY_DIR = path.join(stateDir, "summaries");
@@ -311,6 +315,7 @@ export function createTaskManager({
   const noOutputTimeout = positiveInteger(noOutputTimeoutMs, DEFAULT_NO_OUTPUT_TIMEOUT_MS);
   const watchdogPoll = positiveInteger(watchdogPollMs, DEFAULT_WATCHDOG_POLL_MS);
   const keySlots = parseKeySlots(keySlotsSpec);
+  const taskEvents = createTaskEvents(onEvent);
 
   function environmentWithoutKeySlotSources() {
     const env = { ...process.env };
@@ -423,8 +428,16 @@ export function createTaskManager({
       /** @type {Task[]} */
       const persisted = JSON.parse(raw);
       for (const t of persisted) {
+        const previousStatus = t.status;
+        if (t.summaryOf) t.internal = true;
+        try {
+          t.directory = fs.realpathSync(t.directory);
+        } catch {
+          // A persisted task may outlive a workspace that has since been removed.
+        }
         if (t.status === "running" || t.status === "queued") t.status = "unknown";
         tasks.set(t.id, t);
+        if (t.status !== previousStatus) taskEvents.emitState(t, previousStatus);
       }
       fs.chmodSync(TASKS_FILE, 0o600);
     } catch (err) {
@@ -475,6 +488,8 @@ export function createTaskManager({
       }
       if (cleanupError) throw cleanupError;
     });
+    const task = tasks.get(taskId);
+    if (task) taskEvents.emitState(task);
   }
 
   /**
@@ -561,9 +576,10 @@ export function createTaskManager({
    * @param {string} [params.variant]
    * @param {string|undefined} [params.sessionId]
    * @param {string|null} [params.keySlot]
+   * @param {boolean} [params.internal]
    * @returns {TaskSummary & {next: string}}
    */
-  function dispatch({ prompt, directory, model, variant, sessionId, keySlot }) {
+  function dispatch({ prompt, directory, model, variant, sessionId, keySlot, internal = false }) {
     ensureStateLoaded();
     if (!prompt || typeof prompt !== "string") {
       throw new Error("error: prompt is required\nhelp: taskferry_dispatch requires a non-empty prompt string");
@@ -574,6 +590,7 @@ export function createTaskManager({
     if (!fs.existsSync(directory) || !fs.statSync(directory).isDirectory()) {
       throw new Error(`error: directory does not exist: ${directory}\nhelp: check the path or create the directory first`);
     }
+    const normalizedDirectory = fs.realpathSync(directory);
 
     const resolvedKeySlot = resolveKeySlot(keySlot);
 
@@ -587,7 +604,7 @@ export function createTaskManager({
     const task = {
       id,
       status: "queued",
-      directory,
+      directory: normalizedDirectory,
       model: resolvedModel,
       variant: usingDefaultModel ? "high" : variant || null,
       sessionId: sessionId || null,
@@ -601,12 +618,13 @@ export function createTaskManager({
       promptTotalChars: prompt.length > 200 ? prompt.length : null,
       spawnError: null,
       cancelRequested: false,
+      internal: internal === true,
       failureReason: null,
       keySlot: resolvedKeySlot.keySlot,
     };
     tasks.set(id, task);
     persistTask(task.id);
-    pendingLaunches.set(id, { prompt, directory, model: resolvedModel, variant: task.variant, sessionId, keyEnvValue: resolvedKeySlot.keyEnvValue });
+    pendingLaunches.set(id, { prompt, directory: normalizedDirectory, model: resolvedModel, variant: task.variant, sessionId, keyEnvValue: resolvedKeySlot.keyEnvValue });
     launchQueue.push(id);
     launchQueuedTasks();
 
@@ -754,7 +772,7 @@ export function createTaskManager({
     const task = {
       id,
       status: "queued",
-      directory: SUMMARY_DIR,
+      directory: fs.realpathSync(SUMMARY_DIR),
       model: SUMMARY_MODEL,
       variant: null,
       sessionId: null,
@@ -768,6 +786,7 @@ export function createTaskManager({
       promptTotalChars: null,
       spawnError: null,
       cancelRequested: false,
+      internal: true,
       failureReason: null,
       summaryOf,
     };

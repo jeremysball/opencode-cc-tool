@@ -13,7 +13,7 @@ import { createTaskManager } from "./tasks.js";
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, watchdogPollMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, watchdogPollMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, onEvent } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -30,6 +30,7 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     killFn: killFn ?? (() => { throw new Error("killFn was not injected for this test"); }),
     listModelsFn: listModelsFn ?? (() => "opencode-go/deepseek-v4-flash\n"),
     verifySummaryAgentFn: verifySummaryAgentFn ?? (async () => {}),
+    ...(onEvent != null ? { onEvent } : {}),
     ...(maxDispatchesPerWindow != null ? { maxDispatchesPerWindow } : {}),
     ...(dispatchWindowMs != null ? { dispatchWindowMs } : {}),
     ...(advisorSessionTtlMs != null ? { advisorSessionTtlMs } : {}),
@@ -177,6 +178,26 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     assert.equal(dispatched.promptTotalChars, 500);
     // The hint must survive every lookup path, not just the dispatch() return.
     assert.equal(mgr.status(dispatched.id).promptTotalChars, 500);
+  });
+
+  test("normalizes the task directory before persistence and event emission", (t) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-directory-"));
+    const realDirectory = path.join(root, "real");
+    const linkedDirectory = path.join(root, "linked");
+    fs.mkdirSync(realDirectory);
+    fs.symlinkSync(realDirectory, linkedDirectory, "dir");
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const events = [];
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child, onEvent: (event) => events.push(event) });
+
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: linkedDirectory });
+    child.emit("exit", 0, null);
+
+    assert.equal(dispatched.directory, realDirectory);
+    assert.ok(events.every((event) => event.directory === realDirectory));
+    const onDisk = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
+    assert.equal(onDisk.find((task) => task.id === dispatched.id).directory, realDirectory);
   });
 
   test("a clean exit(0) settles the task to 'done'", () => {
