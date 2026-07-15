@@ -776,7 +776,7 @@ describe("advisor()", () => {
     const child = fakeChild();
     let captured = null;
     const mgr = makeManager({
-      spawnFn: (cmd, args, opts) => {
+      spawnFn: (cmd, args, _opts) => {
         captured = args;
         return child;
       },

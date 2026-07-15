@@ -34,6 +34,8 @@ import { withFileLock } from "./state-lock.js";
  * @property {number|null} promptTotalChars
  * @property {string|null} spawnError
  * @property {boolean} cancelRequested
+ * @property {string|null} [failureReason]
+ * @property {string|null} [keySlot]
  * @property {SummaryOf} [summaryOf]
  */
 
@@ -54,6 +56,8 @@ import { withFileLock } from "./state-lock.js";
  * @property {number} [promptTotalChars]
  * @property {SummaryOf} [summaryOf]
  * @property {boolean} cancelRequested
+ * @property {string|null} [failureReason]
+ * @property {string|null} [keySlot]
  */
 
 /**
@@ -74,6 +78,7 @@ import { withFileLock } from "./state-lock.js";
  * @property {string} model
  * @property {string|null} variant
  * @property {string|null|undefined} [sessionId]
+ * @property {string|null} [keyEnvValue]
  * @property {undefined} [kind]
  * @property {undefined} [snapshotPath]
  */
@@ -84,6 +89,7 @@ import { withFileLock } from "./state-lock.js";
  * @property {string} model
  * @property {string} snapshotPath
  * @property {NodeJS.ProcessEnv} env
+ * @property {string|null} [keyEnvValue]
  */
 
 /** @typedef {DispatchLaunch|SummaryLaunch} LaunchSpec */
@@ -99,6 +105,8 @@ import { withFileLock } from "./state-lock.js";
  * @property {number|null} [exitCode]
  * @property {NodeJS.Signals|null} [signal]
  * @property {string|null} [spawnError]
+ * @property {string|null} [failureReason]
+ * @property {string|null} [keySlot]
  * @property {string|null} [sessionId]
  * @property {unknown} [tokens]
  * @property {number|null} [cost]
@@ -142,6 +150,7 @@ const PROVIDER_EXHAUSTION_PATTERNS = [
 // rate-limit-handling code, narrating "the server returned 429, retry
 // with backoff"); scanning the whole raw log killed tasks mid-run on that
 // false-positive surface (GLM-5.2 review of 0d944df..4e75129, finding 1).
+/** @param {string} rawLogText */
 function detectProviderExhaustion(rawLogText) {
   for (const line of rawLogText.split("\n")) {
     if (!line.trim()) continue;
@@ -179,16 +188,6 @@ function positiveInteger(value, fallback) {
   return Number.isSafeInteger(value) && value > 0 ? value : fallback;
 }
 
-/** @returns {NodeJS.ProcessEnv} */
-function summaryEnvironment() {
-  const env = { ...process.env };
-  delete env.OPENCODE_CONFIG;
-  delete env.OPENCODE_CONFIG_DIR;
-  delete env.OPENCODE_CONFIG_CONTENT;
-  env.OPENCODE_CONFIG_CONTENT = SUMMARY_AGENT_CONFIG;
-  return env;
-}
-
 /**
  * @param {unknown} err
  * @returns {string|undefined}
@@ -205,6 +204,10 @@ function errMessage(err) {
   return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * @param {string|undefined} spec
+ * @returns {Map<string, string>}
+ */
 function parseKeySlots(spec) {
   const slots = new Map();
   if (!spec) return slots;
@@ -252,12 +255,19 @@ const WATCHDOG_KILL_GRACE_MS = 5000;
  * @param {object} [options]
  * @param {typeof spawn} [options.spawnFn]
  * @param {(pid: number, signal: NodeJS.Signals) => void} [options.killFn]
- * @param {() => Promise<string>} [options.listModelsFn]
+ * @param {(env?: NodeJS.ProcessEnv) => Promise<string>} [options.listModelsFn]
  * @param {(env: NodeJS.ProcessEnv) => Promise<void>} [options.verifySummaryAgentFn]
  * @param {string} [options.stateDir]
  * @param {number} [options.maxDispatchesPerWindow]
  * @param {number} [options.dispatchWindowMs]
+ * @param {number} [options.maxConcurrentTasks]
  * @param {number} [options.advisorSessionTtlMs]
+ * @param {number} [options.noOutputTimeoutMs]
+ * @param {number} [options.watchdogPollMs]
+ * @param {string} [options.keySlotsSpec]
+ * @param {string|null} [options.providerKeyEnvName]
+ * @param {string|null} [options.summaryKeySlot]
+ * @param {string|null} [options.summaryProviderKeyEnvName]
  */
 // Factory rather than a module-level singleton, so tests can construct an
 // isolated instance with an injected spawnFn/killFn (no real `opencode`
@@ -308,6 +318,7 @@ export function createTaskManager({
     return env;
   }
 
+  /** @param {string|null|undefined} keyEnvValue */
   function dispatchEnvironment(keyEnvValue) {
     const env = environmentWithoutKeySlotSources();
     if (keyEnvValue != null && providerKeyEnvName) env[providerKeyEnvName] = keyEnvValue;
@@ -510,6 +521,10 @@ export function createTaskManager({
     if (sessionId) advisorSessions.set(sessionId, Date.now());
   }
 
+  /**
+   * @param {string|null|undefined} keySlot
+   * @returns {{keySlot: string|null, keyEnvValue: string|null}}
+   */
   function resolveKeySlot(keySlot) {
     if (keySlot == null) return { keySlot: null, keyEnvValue: null };
     if (!providerKeyEnvName) {
@@ -518,7 +533,7 @@ export function createTaskManager({
     if (!keySlots.has(keySlot)) {
       throw new Error(`error: unknown key_slot: ${keySlot}\nhelp: configured slots are: ${Array.from(keySlots.keys()).join(", ") || "(none configured)"}`);
     }
-    const sourceEnvVar = keySlots.get(keySlot);
+    const sourceEnvVar = /** @type {string} */ (keySlots.get(keySlot));
     const value = process.env[sourceEnvVar];
     if (!value) {
       throw new Error(`error: key_slot "${keySlot}" source variable ${sourceEnvVar} is not set\nhelp: set ${sourceEnvVar} and restart the taskferry MCP server`);
@@ -592,7 +607,10 @@ export function createTaskManager({
     };
   }
 
-  /** @param {string} model */
+  /**
+   * @param {string} model
+   * @param {NodeJS.ProcessEnv} env
+   */
   async function summaryModelAvailable(model, env) {
     if (Date.now() >= modelsCache.expiresAt) {
       try {
@@ -816,9 +834,9 @@ export function createTaskManager({
       fs.chmodSync(task.logPath, 0o600);
       // No tmux: the child has no shared session to introspect. It is its own
       // process group so cancellation can stop any subprocesses it creates.
-      const spawnEnv = isSummary ? launch.env : dispatchEnvironment(launch.keyEnvValue);
+      const spawnEnv = isSummary ? summaryLaunch.env : dispatchEnvironment(dispatchLaunch.keyEnvValue);
       child = spawnFn("opencode", args, {
-        cwd: isSummary ? SUMMARY_DIR : launch.directory,
+        cwd: isSummary ? SUMMARY_DIR : dispatchLaunch.directory,
         stdio: ["ignore", logFd, logFd],
         detached: true,
         env: spawnEnv,
@@ -871,7 +889,7 @@ export function createTaskManager({
       });
 
       task.status = "running";
-      task.pid = child.pid;
+      task.pid = child.pid ?? null;
       runningCount++;
       persistTask(task.id);
       startRunningWatcher(task);
@@ -951,6 +969,7 @@ export function createTaskManager({
     return { ...summarize(task), note: `SIGTERM sent to process group ${task.pid}; escalates to SIGKILL after ${graceMs}ms if it hasn't exited` };
   }
 
+  /** @param {string} taskId */
   function stopRunningWatcher(taskId) {
     const timer = runningWatchers.get(taskId);
     if (timer) {
@@ -965,18 +984,23 @@ export function createTaskManager({
   // failureReason instead of cancelRequested so the exit handler's status
   // computation (unchanged) still lands on "crashed", distinguishable from a
   // user-requested "cancelled".
+  /**
+   * @param {Task} task
+   * @param {string} failureReason
+   */
   function failRunningTask(task, failureReason) {
     if (task.failureReason) return; // already stopping this task
     task.failureReason = failureReason;
     stopRunningWatcher(task.id);
-    sendSignal(task.pid, "SIGTERM");
+    sendSignal(/** @type {number} */ (task.pid), "SIGTERM");
     const timer = setTimeout(() => {
       escalationTimers.delete(task.id);
-      if (tasks.get(task.id)?.status === "running") sendSignal(task.pid, "SIGKILL");
+      if (tasks.get(task.id)?.status === "running") sendSignal(/** @type {number} */ (task.pid), "SIGKILL");
     }, WATCHDOG_KILL_GRACE_MS);
     escalationTimers.set(task.id, timer);
   }
 
+  /** @param {Task} task */
   function startRunningWatcher(task) {
     const startedAtMs = Date.now();
     const timer = setInterval(() => {
@@ -985,7 +1009,7 @@ export function createTaskManager({
         stopRunningWatcher(task.id);
         return;
       }
-      let raw = "";
+      let raw;
       try {
         raw = fs.readFileSync(current.logPath, "utf8");
       } catch {
