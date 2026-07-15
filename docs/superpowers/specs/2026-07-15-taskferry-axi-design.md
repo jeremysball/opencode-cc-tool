@@ -49,7 +49,7 @@ generation so equivalent paths share one scope.
 The daemon exposes a private, versioned JSON RPC protocol over the Unix socket. Protocol
 version `1` is explicit in every envelope. Ordinary calls use one request and response
 per connection. `event.subscribe` keeps a connection open and streams event envelopes
-until the client disconnects or unsubscribes.
+until the client disconnects. Closing the connection unsubscribes the client.
 
 ### Envelopes
 
@@ -193,23 +193,27 @@ narration. They are bounded, cached, and optional. The cache key is:
 taskId + status + outputWatermark + summaryModel + maxWords
 ```
 
-The daemon refreshes running activity only after 4096 additional log bytes or a
-terminal transition, with a default minimum interval of 60000 ms controlled by
-`TASKFERRY_ACTIVITY_MIN_INTERVAL_MS`. `TASKFERRY_ACTIVITY_SUMMARIES=0` disables model
-summaries and selects fallback-only behavior.
+The concrete activity bounds are a default minimum refresh interval of 60000 ms
+(`TASKFERRY_ACTIVITY_MIN_INTERVAL_MS`), a running-task refresh after 4096 additional
+log bytes or a terminal transition, and no model summaries when
+`TASKFERRY_ACTIVITY_SUMMARIES=0` (sanitized local activity text remains the fallback).
 
 Before model output exists, the summary uses the dispatch prompt as context. If the
 secondary provider fails, the daemon returns sanitized local activity text. Concurrent
 subscribers share one in-flight summary request, and cached summaries serve later
-Claude and OpenCode clients. Summary jobs carry the internal marker and remain absent
-from visible task event streams. Integrations treat summaries as convenience context,
-not as the authoritative task result.
+Claude and OpenCode clients. Summary jobs carry an internal-only `internal` flag in
+their task metadata; event projection checks that flag and drops those jobs before
+publishing user-facing events. The flag is not part of the published event shape.
+Integrations treat summaries as convenience context, not as the authoritative task
+result.
 
 ## 6. Native Agent Integrations
 
 Taskferry has no MCP integration. Each supported agent uses its native lifecycle or UI
 extension point, while the `taskferry` skill remains the shared discovery and execution
-contract.
+contract. MCP references are removed from all product code and documentation except
+the dedicated migration guide, which intentionally retains old tool names for its
+mapping table.
 
 ### Skill Hierarchy
 
@@ -259,8 +263,9 @@ Codex uses native `SessionStart` and `UserPromptSubmit` hooks to inject compact,
 workspace-scoped task context. It has no persistent monitor surface, so taskferry makes
 no live-monitor claim for Codex and provides no toast or task-panel UI. Codex receives
 fresh context at session start and before each user turn. Hook enablement follows Codex's
-native trust and configuration controls, including `/hooks` and
-`[features] hooks = true` when the user has not disabled hooks.
+native trust and configuration controls. Hooks are trusted and enabled by default.
+Document Codex hook trust through `/hooks` and `[features] hooks = true` only when
+disabled by the user.
 
 The canonical `skills/taskferry/SKILL.md` generates the distributed Claude Code and
 Codex skill copies. Hooks provide ambient state; the skill provides on-demand command
@@ -269,7 +274,9 @@ discovery. Neither path creates an MCP server.
 ## 7. Explicit Non-Goals
 
 - No `taskferry setup` command.
-- No MCP server, MCP dependencies, MCP configuration, or MCP tool schemas.
+- No MCP server, MCP dependencies, MCP configuration, or MCP tool schemas in product
+  code or documentation, except the dedicated migration guide's intentional old-tool
+  names in its mapping table.
 - No Windows transport until named-pipe support exists.
 - No second public API for native integrations beyond the CLI and its private daemon.
 - No unbounded activity narration or uncached summary calls on every event.
