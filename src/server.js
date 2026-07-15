@@ -80,7 +80,7 @@ server.registerTool(
   {
     title: "Dispatch taskferry task",
     description:
-      "Queue an `opencode run` for background execution as a directly-spawned child process (no tmux, no shared visibility into the orchestration layer) and return a task_id immediately. The server starts at most two tasks in each rolling five-second window by default. After dispatching, call taskferry_poll to block until the task finishes or times out; if it times out, call taskferry_tail to read the latest output and report the task's current status to the user. Once the task is done, call taskferry_result to fetch the final result.",
+      "Queue an `opencode run` for background execution as a directly-spawned child process (no tmux, no shared visibility into the orchestration layer) and return a task_id immediately. At most TASKFERRY_MAX_CONCURRENT_TASKS tasks (default 4) run at once; extra dispatches queue and start FIFO as running tasks finish. A separate, optional launch-rate window (TASKFERRY_MAX_DISPATCHES_PER_WINDOW/TASKFERRY_DISPATCH_WINDOW_MS) can further throttle bursts but is not a concurrency limit. After dispatching, call taskferry_poll to block until the task finishes or times out; if it times out, call taskferry_tail to read the latest output and report the task's current status to the user. Once the task is done, call taskferry_result to fetch the final result.",
     inputSchema: {
       prompt: z.string().describe("The message/prompt to send to opencode."),
       directory: z

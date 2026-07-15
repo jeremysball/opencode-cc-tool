@@ -44,9 +44,12 @@ follow-up call isn't obvious.
 
 Queues `opencode run --dir <directory> --auto --format json -- <prompt>` for
 background execution, with stdout and stderr redirected to a private per-task
-log file. Returns a task summary immediately. The first two tasks in each
-rolling five-second window start immediately; later tasks return
-`status: "queued"` until a launch slot opens.
+log file. Returns a task summary immediately. At most
+TASKFERRY_MAX_CONCURRENT_TASKS tasks (default 4) run at once; extra
+dispatches return `status: "queued"` and start FIFO as running tasks
+finish. A separate, optional launch-rate window
+(TASKFERRY_MAX_DISPATCHES_PER_WINDOW / TASKFERRY_DISPATCH_WINDOW_MS) can
+further throttle bursts but is not a concurrency limit.
 
 - `directory` must be an absolute path that exists.
 - `model`: any valid `provider/model` string (run `opencode models` to list
@@ -61,12 +64,46 @@ rolling five-second window start immediately; later tasks return
   <id>`) instead of starting fresh. Get session ids from a prior
   `taskferry_result` or `taskferry_status` response.
 
-#### Launch rate
+#### Concurrency and launch rate
 
-- `TASKFERRY_MAX_DISPATCHES_PER_WINDOW`: maximum task launches per
-  rolling window. Defaults to `2`.
-- `TASKFERRY_DISPATCH_WINDOW_MS`: rolling-window duration in
-  milliseconds. Defaults to `5000`.
+- `TASKFERRY_MAX_CONCURRENT_TASKS`: maximum number of tasks allowed to be
+  `running` at once. Defaults to `4`. Extra dispatches queue and start FIFO
+  as running tasks finish, are cancelled, fail to spawn, or hit the
+  no-output watchdog.
+- `TASKFERRY_MAX_DISPATCHES_PER_WINDOW` / `TASKFERRY_DISPATCH_WINDOW_MS`: an
+  independent, optional burst-rate control — at most this many *launches*
+  per rolling window (defaults `2` per `5000`ms). This is not a concurrency
+  cap; use `TASKFERRY_MAX_CONCURRENT_TASKS` for that.
+- `TASKFERRY_NO_OUTPUT_TIMEOUT_MS` (default `120000`): a running task that
+  writes no parseable log event before this deadline is stopped (`SIGTERM`,
+  escalating to `SIGKILL`) and marked `crashed` with `failureReason:
+  "no_output_timeout"`.
+- `TASKFERRY_WATCHDOG_POLL_MS` (default `2000`): how often the no-output and
+  provider-usage-exhaustion checks run against a running task's log.
+- A task stopped because its log matched a known provider-usage-exhaustion
+  diagnostic (rate limit, quota, `429`, ...) instead gets `failureReason:
+  "provider_usage_exhausted"` — distinct from a bare timeout so a caller
+  knows to pick another key slot or model rather than just retrying.
+
+#### Key slots
+
+- `TASKFERRY_KEY_SLOTS`: a comma-separated registry mapping a slot name to
+  the *source* environment variable holding that key, e.g.
+  `TASKFERRY_KEY_SLOTS=primary:OPENCODE_GO_API_KEY,backup:OPENCODE_GO_API_KEY_BACKUP`.
+- `TASKFERRY_PROVIDER_KEY_ENV`: the environment variable name the `opencode`
+  child actually reads for its provider key (e.g. `OPENCODE_GO_API_KEY`).
+  The selected slot's source value is copied into *this* variable in the
+  child's environment only — never into task state, logs, prompts, or tool
+  output.
+- Pass `key_slot` to `taskferry_dispatch` to pick a configured slot for that
+  task. An unconfigured, unknown, or unset-source slot fails immediately,
+  before anything spawns.
+- `TASKFERRY_SUMMARY_KEY_SLOT` / `TASKFERRY_SUMMARY_PROVIDER_KEY_ENV`:
+  the separate key slot and target variable used for `taskferry_summary`'s
+  DeepSeek child. A source task's own `key_slot` never transfers to its
+  summary task.
+- The MCP server only sees environment values present at its own startup;
+  restart it after changing any of these variables.
 
 ### `taskferry_poll(task_id, timeout_ms?, tail_chars?)`
 
@@ -120,6 +157,11 @@ Returns `{ status: "queued" | "running" | "done" | "crashed" | "cancelled" |
 process's actual exit event (`child.on("exit", ...)`), not from parsing
 output. `"unknown"` appears only if the server process restarted while the
 task was still running; see Limitations.
+
+`failureReason` is `null` unless the task was stopped by the no-output
+watchdog (`"no_output_timeout"`) or provider-usage-exhaustion detection
+(`"provider_usage_exhausted"`). `keySlot` echoes the `key_slot` name the
+task was dispatched with, or `null`.
 
 ### `taskferry_tail(task_id, chars?)`
 
