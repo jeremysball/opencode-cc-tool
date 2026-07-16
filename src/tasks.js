@@ -359,6 +359,7 @@ export function createTaskManager({
       // (GLM-5.2 review of 0d944df..4e75129, finding 2).
       env[providerKeyEnvName] = process.env[providerKeyEnvName];
     }
+    env.TASKFERRY_CHILD = "1";
     return env;
   }
 
@@ -379,6 +380,7 @@ export function createTaskManager({
       }
       env[summaryProviderKeyEnvName] = value;
     }
+    env.TASKFERRY_CHILD = "1";
     return env;
   }
 

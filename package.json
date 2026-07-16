@@ -10,7 +10,7 @@
   "scripts": {
     "start": "node src/cli.js",
     "test": "npm run test:unit",
-    "test:unit": "node --test src/tasks.test.js src/events.test.js src/protocol.test.js src/state-lock.test.js src/daemon.test.js src/args.test.js src/cli.test.js",
+    "test:unit": "node --test src/tasks.test.js src/events.test.js src/protocol.test.js src/state-lock.test.js src/daemon.test.js src/args.test.js src/cli.test.js src/opencode-plugin.test.js",
     "test:integration": "node --test src/daemon.test.js",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
