@@ -559,6 +559,33 @@ describe("provider-usage-exhaustion detection", () => {
     assert.equal(mgr.status(dispatched.id).failureReason, "provider_usage_exhausted");
   });
 
+  test("status still lands on crashed when the SIGTERM'd child exits 0 (traps the signal) instead of dying by signal", async () => {
+    const child = fakeChild(7105);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 60000,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n"
+    );
+
+    await new Promise((r) => setTimeout(r, 40));
+    assert.ok(killed.some((k) => k.signal === "SIGTERM"));
+
+    // A well-behaved CLI can trap SIGTERM and shut down cleanly (exit 0, no
+    // signal) instead of dying by the signal itself. That must not read as
+    // "done" and bury the failureReason behind a healthy-looking status.
+    child.emit("exit", 0, null);
+    const s = mgr.status(dispatched.id);
+    assert.equal(s.status, "crashed");
+    assert.equal(s.failureReason, "provider_usage_exhausted");
+  });
+
   test("ordinary crash text is not misclassified as provider exhaustion", () => {
     const child = fakeChild(7102);
     const mgr = makeManager({ spawnFn: () => child, killFn: () => {} });
@@ -1078,10 +1105,10 @@ describe("list()", () => {
     assert.deepEqual(mgr.list().counts, { queued: 0, running: 0, done: 1, crashed: 1, cancelled: 1, unknown: 1 });
   });
 
-  test("rows use the minimal 4-field schema, not the full detail object", () => {
+  test("rows use the minimal schema plus failureReason, not the full detail object", () => {
     const mgr = makeManager({ tasksFixture: [baseTask({ id: "t1" })] });
     const row = mgr.list().tasks[0];
-    assert.deepEqual(Object.keys(row).sort(), ["id", "model", "startedAt", "status"]);
+    assert.deepEqual(Object.keys(row).sort(), ["failureReason", "id", "model", "startedAt", "status"]);
   });
 
   test("sorts newest first by startedAt", () => {

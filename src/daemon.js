@@ -148,7 +148,7 @@ function filteredList(manager, directory) {
   if (directory === undefined) return manager.list();
   const details = filteredTaskDetails(manager, directory);
   const counts = countTasks(details.tasks);
-  const rows = details.tasks.map(({ id, status, model, startedAt }) => ({ id, status, model, startedAt }));
+  const rows = details.tasks.map(({ id, status, model, startedAt, failureReason }) => ({ id, status, model, startedAt, failureReason: failureReason ?? null }));
   return { counts, tasks: rows.length ? rows : "none found in this workspace" };
 }
 

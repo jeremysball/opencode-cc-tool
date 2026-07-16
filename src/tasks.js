@@ -512,14 +512,18 @@ export function createTaskManager({
   // Minimal per-row schema for taskferry_list: an agent scanning a task list
   // needs id/status/model/startedAt to decide what to poll next, not the full
   // detail (directory, pid, logPath, ...) that summarize() carries for a
-  // single-task lookup.
+  // single-task lookup. failureReason is included despite that otherwise-thin
+  // schema because a "crashed" status alone doesn't tell a scanning agent
+  // whether the task is worth retrying immediately (provider_usage_exhausted)
+  // or not (any other crash) -- omitting it here forces a task.status
+  // round-trip per crashed row just to learn that.
   /**
    * @param {Task} task
-   * @returns {{id: string, status: string, model: string, startedAt: string}}
+   * @returns {{id: string, status: string, model: string, startedAt: string, failureReason: string|null}}
    */
   function summarizeRow(task) {
-    const { id, status, model, startedAt } = task;
-    return { id, status, model, startedAt };
+    const { id, status, model, startedAt, failureReason } = task;
+    return { id, status, model, startedAt, failureReason: failureReason ?? null };
   }
 
   /**
@@ -900,7 +904,10 @@ export function createTaskManager({
           clearTimeout(timer);
           escalationTimers.delete(task.id);
         }
-        task.status = task.cancelRequested ? "cancelled" : code === 0 && !signal ? "done" : "crashed";
+        // A watchdog-killed child (task.failureReason already set) can still exit
+        // 0/unsignaled if it traps SIGTERM and shuts down gracefully -- don't let
+        // that read as "done" and bury the failureReason behind a healthy status.
+        task.status = task.cancelRequested ? "cancelled" : task.failureReason ? "crashed" : code === 0 && !signal ? "done" : "crashed";
         task.exitCode = code;
         task.signal = signal;
         task.endedAt = new Date().toISOString();
