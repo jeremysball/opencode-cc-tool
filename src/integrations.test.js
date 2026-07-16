@@ -118,6 +118,32 @@ test("SessionStart hook wraps CLI TOON context in Claude JSON output", () => {
   }
 });
 
+test("SessionStart hook reports a structured error when an installed taskferry fails", () => {
+  const hooks = readJson("integrations", "claude", "hooks", "hooks.json");
+  const command = hooks.hooks.SessionStart[0].hooks[0].command;
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-hook-bin-"));
+  const taskferry = path.join(bin, "taskferry");
+
+  try {
+    fs.writeFileSync(taskferry, "#!/bin/sh\nexit 1\n");
+    fs.chmodSync(taskferry, 0o755);
+    const result = spawnSync("sh", ["-c", command], {
+      env: { ...process.env, CLAUDE_PROJECT_DIR: "/project", PATH: `${bin}:${process.env.PATH}` },
+      encoding: "utf8",
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      hookSpecificOutput: {
+        hookEventName: "SessionStart",
+        additionalContext: "taskferry context failed. Run taskferry doctor to diagnose.",
+      },
+    });
+  } finally {
+    fs.rmSync(bin, { recursive: true, force: true });
+  }
+});
+
 test("Claude monitor output stays on one line after activity sanitization", () => {
   const line = formatWatchEvent({
     type: "task.activity",
