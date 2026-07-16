@@ -2,7 +2,7 @@ import os from "node:os";
 import path from "node:path";
 import { encode } from "@toon-format/toon";
 
-const HINT_KEYS = new Set(["help", "next", "note"]);
+const HINT_KEYS = new Set(["help", "next", "note", "message"]);
 
 function migrateHint(text) {
   return text
@@ -93,6 +93,12 @@ export function leanStatus(detail, { full = false } = {}) {
 export function leanResult(detail, { full = false, fields } = {}) {
   if (full || fields) return detail;
   const { narration: _narration, narrationTruncated: _narrationTruncated, ...rest } = detail;
+  if (detail.narrationTotalChars === undefined) {
+    return {
+      ...rest,
+      next: `Run taskferry wait with task id "${detail.taskId}" to block until the task settles, then re-run taskferry result`,
+    };
+  }
   return {
     ...rest,
     next: `Run taskferry result --full or --fields narration with task id "${detail.taskId}" to see intermediate step narration (${detail.narrationTotalChars} chars total)`,
