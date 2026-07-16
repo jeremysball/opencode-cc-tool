@@ -118,6 +118,31 @@ test("SessionStart hook wraps CLI TOON context in Claude JSON output", () => {
   }
 });
 
+test("SessionStart hook passes CLAUDE_PROJECT_DIR as a single unquoted argument", () => {
+  const hooks = readJson("integrations", "claude", "hooks", "hooks.json");
+  const command = hooks.hooks.SessionStart[0].hooks[0].command;
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-hook-bin-"));
+  const taskferry = path.join(bin, "taskferry");
+
+  try {
+    fs.writeFileSync(
+      taskferry,
+      "#!/bin/sh\nfor a in \"$@\"; do printf '[%s]' \"$a\"; done\nprintf '\\n'\n"
+    );
+    fs.chmodSync(taskferry, 0o755);
+    const result = spawnSync("sh", ["-c", command], {
+      env: { ...process.env, CLAUDE_PROJECT_DIR: "/tmp/some project", PATH: `${bin}:${process.env.PATH}` },
+      encoding: "utf8",
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    const { additionalContext } = JSON.parse(result.stdout).hookSpecificOutput;
+    assert.equal(additionalContext, "[context][--directory][/tmp/some project][--format][toon]\n");
+  } finally {
+    fs.rmSync(bin, { recursive: true, force: true });
+  }
+});
+
 test("SessionStart hook reports a structured error when an installed taskferry fails", () => {
   const hooks = readJson("integrations", "claude", "hooks", "hooks.json");
   const command = hooks.hooks.SessionStart[0].hooks[0].command;
