@@ -244,10 +244,7 @@ export async function startDaemon({
       socket.destroy();
       return false;
     }
-    if (!socket.write(encoded)) {
-      socket.destroy();
-      return false;
-    }
+    socket.write(encoded);
     return true;
   };
   const onEvent = (event) => {
