@@ -52,3 +52,11 @@ The existing `npm test` script enumerates the prior unit-test files and does not
 
 - The canonical `skills/taskferry/SKILL.md` and `scripts/generate-skill.js` are intentionally absent. Task 6 writes the Claude copy directly; Task 8 owns the canonical source and generator.
 - Claude's `claude plugin validate` command was available and passed with `--strict`. No validator concerns remain.
+
+## Controller Addendum (post-review fixes)
+
+Two review passes found and fixed real bugs in the SessionStart hook, not present in the numbers above:
+
+- Review pass 1 found the `&&` short-circuit dropped all hook output when an installed `taskferry` exited nonzero. Fixed in commit `59f0f14`, adding one regression test.
+- Review pass 2 found the directory argument's quoting decoded to a literal backslash-quote instead of a real shell quote, so `taskferry` received literal quote characters and paths with spaces still split into multiple arguments. Fixed in commit `41f9698`, adding one regression test and hardening the missing-binary test to actually execute that branch.
+- The integration suite now has 9 tests (not 7 as reported above), all passing: `node --test src/integrations.test.js`.

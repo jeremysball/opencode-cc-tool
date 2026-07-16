@@ -189,6 +189,24 @@ test("missing taskferry guidance is a single actionable plugin error", () => {
   assert.match(command, /taskferry is unavailable/);
   assert.match(command, /install taskferry/i);
   assert.equal((command.match(/taskferry is unavailable/g) || []).length, 1);
+
+  const emptyBin = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-hook-empty-bin-"));
+  try {
+    const result = spawnSync("/bin/sh", ["-c", command], {
+      env: { ...process.env, CLAUDE_PROJECT_DIR: "/project", PATH: emptyBin },
+      encoding: "utf8",
+    });
+
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      hookSpecificOutput: {
+        hookEventName: "SessionStart",
+        additionalContext: "taskferry is unavailable. Install taskferry and ensure it is on PATH, then restart Claude Code.",
+      },
+    });
+  } finally {
+    fs.rmSync(emptyBin, { recursive: true, force: true });
+  }
 });
 
 test("bundled skill teaches the AXI worker contract without extra plugin surfaces", () => {
