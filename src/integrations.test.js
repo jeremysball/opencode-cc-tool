@@ -10,6 +10,7 @@ import { runCli } from "./cli.js";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const claudeRoot = path.join(root, "integrations", "claude");
+const codexRoot = path.join(root, "integrations", "codex");
 
 function readJson(...parts) {
   return JSON.parse(fs.readFileSync(path.join(root, ...parts), "utf8"));
@@ -206,6 +207,114 @@ test("missing taskferry guidance is a single actionable plugin error", () => {
     });
   } finally {
     fs.rmSync(emptyBin, { recursive: true, force: true });
+  }
+});
+
+test("Codex plugin manifests expose native skills and lifecycle hooks", () => {
+  const plugin = readJson("integrations", "codex", ".codex-plugin", "plugin.json");
+  const marketplace = readJson(".agents", "plugins", "marketplace.json");
+  const hooks = readJson("integrations", "codex", "hooks", "hooks.json");
+
+  assert.equal(plugin.name, "taskferry");
+  assert.equal(plugin.hooks, "./hooks/hooks.json");
+  assert.equal(plugin.skills, "./skills/");
+  assert.deepEqual(
+    Object.keys(plugin).filter((key) => ["mcpServers", "apps"].includes(key)),
+    []
+  );
+  assert.equal(marketplace.name, "taskferry");
+  assert.equal(marketplace.interface.displayName, "Taskferry");
+  assert.deepEqual(marketplace.plugins, [{
+    name: "taskferry",
+    displayName: "Taskferry",
+    source: { source: "local", path: "./integrations/codex" },
+    policy: { installation: "AVAILABLE", authentication: "ON_INSTALL" },
+    category: "Development & Workflow",
+    description: "Background OpenCode task execution through the Taskferry AXI CLI",
+  }]);
+
+  assert.match(hooks.description, /workspace context/i);
+  assert.deepEqual(Object.keys(hooks.hooks).sort(), ["SessionStart", "UserPromptSubmit"]);
+  for (const event of ["SessionStart", "UserPromptSubmit"]) {
+    assert.equal(hooks.hooks[event].length, 1);
+    const hook = hooks.hooks[event][0].hooks[0];
+    assert.equal(hook.type, "command");
+    assert.match(hook.command, /taskferry context --format codex-hook/);
+    assert.equal(hook.command.includes("watch"), false);
+  }
+});
+
+test("Codex context uses the native additionalContext payload", () => {
+  const context = {
+    directory: "/workspace/project",
+    counts: { total: 1, running: 1, queued: 0, terminal: 0 },
+    tasks: [{ id: "oc_ab12", status: "running", model: "openai/gpt-5.6-sol", startedAt: "2026-07-15T00:00:00Z" }],
+  };
+
+  assert.deepEqual(contextForHook(context, "codex-hook"), {
+    additionalContext: "directory: /workspace/project\ncounts:\n  total: 1\n  running: 1\n  queued: 0\n  terminal: 0\ntasks[1]{id,status,model,startedAt}:\n  oc_ab12,running,openai/gpt-5.6-sol,\"2026-07-15T00:00:00Z\"",
+  });
+});
+
+test("Codex lifecycle hooks emit workspace context with an isolated CODEX_HOME", () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-codex-hook-"));
+  const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-codex-home-"));
+  const bin = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-codex-bin-"));
+  const taskferry = path.join(bin, "taskferry");
+
+  try {
+    fs.writeFileSync(taskferry, "#!/bin/sh\nprintf '{\"additionalContext\":\"workspace: %s\"}' \"$(pwd)\"\n");
+    fs.chmodSync(taskferry, 0o755);
+
+    const hooks = readJson("integrations", "codex", "hooks", "hooks.json");
+    for (const event of ["SessionStart", "UserPromptSubmit"]) {
+      const command = hooks.hooks[event][0].hooks[0].command;
+      const result = spawnSync("sh", ["-c", command], {
+        cwd: project,
+        env: { ...process.env, CODEX_HOME: codexHome, PATH: `${bin}:${process.env.PATH}` },
+        encoding: "utf8",
+      });
+
+      assert.equal(result.status, 0, result.stderr);
+      assert.deepEqual(JSON.parse(result.stdout), {
+        additionalContext: `workspace: ${project}`,
+      });
+    }
+  } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+    fs.rmSync(codexHome, { recursive: true, force: true });
+    fs.rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+test("distributed skills are generated from the canonical source", () => {
+  const canonical = fs.readFileSync(path.join(root, "skills", "taskferry", "SKILL.md"), "utf8");
+  assert.equal(fs.readFileSync(path.join(claudeRoot, "skills", "taskferry", "SKILL.md"), "utf8"), canonical);
+  assert.equal(fs.readFileSync(path.join(codexRoot, "skills", "taskferry", "SKILL.md"), "utf8"), canonical);
+
+  const result = spawnSync(process.execPath, ["scripts/generate-skill.js", "--check"], {
+    cwd: root,
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr);
+});
+
+test("skill check detects a stale generated copy", () => {
+  const generated = path.join(codexRoot, "skills", "taskferry", "SKILL.md");
+  const original = fs.readFileSync(generated, "utf8");
+
+  try {
+    fs.writeFileSync(generated, `${original}\nstale\n`);
+    const result = spawnSync(process.execPath, ["scripts/generate-skill.js", "--check"], {
+      cwd: root,
+      encoding: "utf8",
+    });
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /stale/i);
+    assert.match(result.stderr, /integrations\/codex\/skills\/taskferry\/SKILL\.md/);
+  } finally {
+    fs.writeFileSync(generated, original);
   }
 });
 

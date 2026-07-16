@@ -10,8 +10,10 @@
   "scripts": {
     "start": "node src/cli.js",
     "test": "npm run test:unit",
-    "test:unit": "node --test src/tasks.test.js src/events.test.js src/protocol.test.js src/state-lock.test.js src/daemon.test.js src/args.test.js src/cli.test.js src/opencode-plugin.test.js",
+    "test:unit": "node --test src/tasks.test.js src/events.test.js src/protocol.test.js src/state-lock.test.js src/daemon.test.js src/args.test.js src/cli.test.js src/integrations.test.js src/opencode-plugin.test.js",
     "test:integration": "node --test src/daemon.test.js",
+    "skill:generate": "node scripts/generate-skill.js",
+    "skill:check": "node scripts/generate-skill.js --check",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "check": "git ls-files '*.js' | xargs -P4 -I{} node --check {} && npm run lint && npm run typecheck",
