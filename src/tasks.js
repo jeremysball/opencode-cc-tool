@@ -122,10 +122,9 @@ const DEFAULT_STATE_DIR =
   process.env.TASKFERRY_STATE_DIR ||
   path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "taskferry");
 
-// The MCP tool-call default timeout in Claude Code is 60s (MCP_TOOL_TIMEOUT).
-// Cap the internal poll below that so a long task returns a clean
-// "still running" instead of the whole tool call erroring out from the
-// client side with no result at all.
+// Cap how long `taskferry wait` blocks a single call so a long task returns
+// a clean "still running" instead of leaving a caller blocked indefinitely;
+// callers loop `wait` past this cap for longer tasks.
 const MAX_WAIT_MS = 45000;
 
 const NARRATION_PREVIEW_CHARS = 2000;
@@ -376,7 +375,7 @@ export function createTaskManager({
       }
       const value = process.env[sourceEnvVar];
       if (!value) {
-        throw new Error(`error: summary key slot "${summaryKeySlot}" source variable ${sourceEnvVar} is not set\nhelp: set ${sourceEnvVar} and restart the taskferry MCP server`);
+        throw new Error(`error: summary key slot "${summaryKeySlot}" source variable ${sourceEnvVar} is not set\nhelp: set ${sourceEnvVar}, then stop the taskferry daemon (kill the pid from \`taskferry doctor --full\`) so the next command starts a fresh one with the new environment`);
       }
       env[summaryProviderKeyEnvName] = value;
     }
@@ -412,7 +411,7 @@ export function createTaskManager({
   // "not in the task object" reason as escalationTimers.
   const runningWatchers = new Map();
 
-  // Pending taskferry_poll callbacks, keyed by task id. Lets a single MCP tool
+  // Pending `wait` callbacks, keyed by task id. Lets a single `taskferry wait`
   // call block until the child's exit event fires (or a timeout elapses)
   // instead of the caller round-tripping taskferry_status in a loop. Not
   // persisted or shared across a server restart, same as the tasks map itself.
@@ -629,7 +628,7 @@ export function createTaskManager({
     const sourceEnvVar = /** @type {string} */ (keySlots.get(keySlot));
     const value = process.env[sourceEnvVar];
     if (!value) {
-      throw new Error(`error: key_slot "${keySlot}" source variable ${sourceEnvVar} is not set\nhelp: set ${sourceEnvVar} and restart the taskferry MCP server`);
+      throw new Error(`error: key_slot "${keySlot}" source variable ${sourceEnvVar} is not set\nhelp: set ${sourceEnvVar}, then stop the taskferry daemon (kill the pid from \`taskferry doctor --full\`) so the next command starts a fresh one with the new environment`);
     }
     return { keySlot, keyEnvValue: value };
   }
@@ -1687,7 +1686,7 @@ export function createTaskManager({
   };
 }
 
-// The one real instance the MCP server uses: real spawn, real process.kill,
+// The one real instance the daemon uses: real spawn, real process.kill,
 // real state directory. Everything else (tests) calls createTaskManager()
 // directly with injected spawnFn/killFn and an isolated stateDir.
 export const defaultTaskManager = createTaskManager();
