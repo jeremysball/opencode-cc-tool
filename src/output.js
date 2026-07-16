@@ -111,6 +111,7 @@ function listRow(row) {
     status: row.status,
     model: row.model,
     startedAt: row.startedAt,
+    ...(row.failureReason ? { failureReason: row.failureReason } : {}),
   };
 }
 

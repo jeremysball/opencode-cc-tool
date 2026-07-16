@@ -121,9 +121,9 @@ export function buildLocalActivity({ status, prompt, promptPreview, narration, t
   return local || `Task ${status || "activity"}`;
 }
 
-/** @param {{id: string, status: string}} task @param {number} outputWatermark @param {string} summaryModel @param {number} maxWords */
-export function activityCacheKey(task, outputWatermark, summaryModel, maxWords) {
-  return JSON.stringify([task.id, task.status, outputWatermark, summaryModel, maxWords]);
+/** @param {{id: string, status: string}} task @param {number} outputWatermark @param {string} summaryModel @param {number} maxWords @param {boolean} includeSummary */
+export function activityCacheKey(task, outputWatermark, summaryModel, maxWords, includeSummary) {
+  return JSON.stringify([task.id, task.status, outputWatermark, summaryModel, maxWords, !!includeSummary]);
 }
 
 /**
@@ -159,7 +159,8 @@ export function createActivityCache({
     const current = snapshot(task);
     const outputWatermark = Number(current.outputWatermark) || 0;
     const resolvedMaxWords = requestedMaxWords ?? maxWords;
-    const key = activityCacheKey(task, outputWatermark, summaryModel, resolvedMaxWords);
+    const resolvedIncludeSummary = includeSummary ?? summariesEnabledState;
+    const key = activityCacheKey(task, outputWatermark, summaryModel, resolvedMaxWords, resolvedIncludeSummary);
     const cached = cache.get(key);
     if (cached) return Promise.resolve({ ...cached, cached: true });
     const pending = inFlight.get(key);
@@ -181,7 +182,7 @@ export function createActivityCache({
     const promise = (async () => {
       let activity = fallback;
       let summaryFailed = false;
-      if (includeSummary ?? summariesEnabledState) {
+      if (resolvedIncludeSummary) {
         try {
           const summarized = await summarize({ task, snapshot: current, maxWords: resolvedMaxWords, summaryModel });
           const text = sanitizeActivityText(summarized);

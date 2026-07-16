@@ -255,3 +255,37 @@ test("doctor is a structured health check and --full preserves extra daemon fiel
   assert.equal(capture.output().value.socketPath, "/tmp/taskferry.sock");
   assert.deepEqual(calls, [{ method: "system.health", params: {} }]);
 });
+
+test("summary --wait reports a not-settled note instead of summarizing when the task is still active", async () => {
+  const capture = capturedIo();
+  const { client, calls } = fakeClient({
+    "task.wait": { id: "oc_1", status: "running", startedAt: "2026-07-15T00:00:00.000Z" },
+  });
+  const result = await runCli(["summary", "oc_1", "--wait"], { io: capture.io, connectClient: async () => client });
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(capture.output().value, {
+    id: "oc_1",
+    status: "running",
+    startedAt: "2026-07-15T00:00:00.000Z",
+    next: 'Run taskferry wait or taskferry status with task id "oc_1" to check progress; pass --full for directory/model/log path details',
+    note: 'Task has not settled yet (status: running); run taskferry summary --wait again to keep waiting, or omit --wait to summarize the in-progress task',
+  });
+  assert.deepEqual(calls, [{ method: "task.wait", params: { taskId: "oc_1" } }]);
+});
+
+test("summary --wait proceeds to summarize once task.wait reports a settled status", async () => {
+  const capture = capturedIo();
+  const { client, calls } = fakeClient({
+    "task.wait": { id: "oc_1", status: "done", startedAt: "2026-07-15T00:00:00.000Z" },
+    "task.summary": { text: "it worked" },
+  });
+  const result = await runCli(["summary", "oc_1", "--wait"], { io: capture.io, connectClient: async () => client });
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(capture.output().value, { text: "it worked" });
+  assert.deepEqual(calls, [
+    { method: "task.wait", params: { taskId: "oc_1" } },
+    { method: "task.summary", params: { taskId: "oc_1" } },
+  ]);
+});

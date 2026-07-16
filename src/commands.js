@@ -85,7 +85,13 @@ export async function runCommand(command, options, { client, io = process, signa
       });
     case "summary": {
       if (options.wait) {
-        await client.request("task.wait", { taskId: options.taskId });
+        const waited = await client.request("task.wait", { taskId: options.taskId });
+        if (waited.status === "running" || waited.status === "queued") {
+          return {
+            ...leanStatus(waited, { full: options.full }),
+            note: `Task has not settled yet (status: ${waited.status}); run taskferry summary --wait again to keep waiting, or omit --wait to summarize the in-progress task`,
+          };
+        }
       }
       const summary = await client.request("task.summary", {
         taskId: options.taskId,

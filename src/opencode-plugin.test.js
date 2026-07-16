@@ -159,6 +159,30 @@ test("does not consume a terminal transition when it is only observed, then cons
   await hooks.dispose();
 });
 
+test("task.activity events refresh activity text for active and unseen-terminal rows, and ignore non-string activity", async () => {
+  const opencode = fakeOpenCodeClient();
+  const daemon = fakeDaemon();
+  const hooks = await createOpenCodePlugin({ client: opencode.client, directory: temporaryDirectory() }, {
+    connectClientFn: async () => daemon,
+  });
+  const onEvent = daemon.subscriptions[0].onEvent;
+
+  onEvent({ type: "task.state", taskId: "oc_active", status: "running", activity: null });
+  onEvent({ type: "task.state", taskId: "oc_terminal", status: "done", activity: null });
+
+  onEvent({ type: "task.activity", taskId: "oc_active", activity: "still working" });
+  onEvent({ type: "task.activity", taskId: "oc_terminal", activity: "wrapped up" });
+  onEvent({ type: "task.activity", taskId: "oc_active", activity: 42 });
+  onEvent({ type: "task.activity", taskId: "oc_unknown", activity: "ignored, no such task" });
+
+  const output = { system: [] };
+  await hooks["experimental.chat.system.transform"]({ sessionID: "session-1", model: {} }, output);
+
+  assert.match(output.system[0], /running · oc_active: still working/);
+  assert.match(output.system[0], /done · oc_terminal: wrapped up/);
+  await hooks.dispose();
+});
+
 test("logs daemon connection failures and leaves OpenCode hooks usable", async () => {
   const opencode = fakeOpenCodeClient();
   const hooks = await createOpenCodePlugin({ client: opencode.client, directory: temporaryDirectory() }, {

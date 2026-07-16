@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createActivityCache, buildLocalActivity, snapshotNarration } from "./activity.js";
+import { createActivityCache, buildLocalActivity, snapshotNarration, activityCacheKey } from "./activity.js";
 import { runCli } from "./cli.js";
 import { parseRequestLine } from "./protocol.js";
 import { createTaskManager } from "./tasks.js";
@@ -257,5 +257,13 @@ describe("activity summary cache", () => {
     }));
 
     assert.equal(request.params.summaries, true);
+  });
+
+  test("activityCacheKey differs by includeSummary so on/off requests don't share a cache entry", () => {
+    const task = { id: "oc_1", status: "running" };
+    const withSummary = activityCacheKey(task, 4096, "test/model", 24, true);
+    const withoutSummary = activityCacheKey(task, 4096, "test/model", 24, false);
+
+    assert.notEqual(withSummary, withoutSummary);
   });
 });

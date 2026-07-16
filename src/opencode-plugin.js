@@ -111,13 +111,10 @@ export async function createOpenCodePlugin(
       rememberTask(event);
       void showToast(event);
     } else if (event.type === "task.activity") {
-      const current = activeTasks.get(event.taskId);
-      if (current) {
-        activeTasks.set(event.taskId, {
-          ...current,
-          activity: typeof event.activity === "string" ? event.activity : current.activity,
-        });
-      }
+      if (typeof event.activity !== "string") return;
+      const target = activeTasks.has(event.taskId) ? activeTasks : unseenTerminalTasks;
+      const current = target.get(event.taskId);
+      if (current) target.set(event.taskId, { ...current, activity: event.activity });
     }
   };
 
