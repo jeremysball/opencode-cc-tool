@@ -122,9 +122,8 @@ const DEFAULT_STATE_DIR =
   process.env.TASKFERRY_STATE_DIR ||
   path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "taskferry");
 
-// Cap how long `taskferry wait` blocks a single call so a long task returns
-// a clean "still running" instead of leaving a caller blocked indefinitely;
-// callers loop `wait` past this cap for longer tasks.
+// Default timeout for advisor() and the internal activity-summary poll.
+// Regular taskferry wait calls have no implicit timeout.
 const MAX_WAIT_MS = 45000;
 
 const NARRATION_PREVIEW_CHARS = 2000;
@@ -252,6 +251,10 @@ const DEFAULT_NO_OUTPUT_TIMEOUT_MS = positiveInteger(
   Number(process.env.TASKFERRY_NO_OUTPUT_TIMEOUT_MS),
   120000
 );
+const DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS = positiveInteger(
+  Number(process.env.TASKFERRY_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS),
+  300000
+);
 const DEFAULT_WATCHDOG_POLL_MS = positiveInteger(
   Number(process.env.TASKFERRY_WATCHDOG_POLL_MS),
   2000
@@ -270,7 +273,9 @@ const WATCHDOG_KILL_GRACE_MS = 5000;
  * @param {number} [options.maxConcurrentTasks]
  * @param {number} [options.advisorSessionTtlMs]
  * @param {number} [options.noOutputTimeoutMs]
+ * @param {number} [options.postOutputNoOutputTimeoutMs]
  * @param {number} [options.watchdogPollMs]
+ * @param {number} [options.maxWaitMs]
  * @param {string} [options.keySlotsSpec]
  * @param {string|null} [options.providerKeyEnvName]
  * @param {string|null} [options.summaryKeySlot]
@@ -306,7 +311,9 @@ export function createTaskManager({
   maxConcurrentTasks = DEFAULT_MAX_CONCURRENT_TASKS,
   advisorSessionTtlMs = DEFAULT_ADVISOR_SESSION_TTL_MS,
   noOutputTimeoutMs = DEFAULT_NO_OUTPUT_TIMEOUT_MS,
+  postOutputNoOutputTimeoutMs = DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS,
   watchdogPollMs = DEFAULT_WATCHDOG_POLL_MS,
+  maxWaitMs = MAX_WAIT_MS,
   keySlotsSpec = process.env.TASKFERRY_KEY_SLOTS,
   providerKeyEnvName = process.env.TASKFERRY_PROVIDER_KEY_ENV || null,
   summaryKeySlot = process.env.TASKFERRY_SUMMARY_KEY_SLOT || null,
@@ -326,7 +333,9 @@ export function createTaskManager({
   const concurrencyLimit = positiveInteger(maxConcurrentTasks, DEFAULT_MAX_CONCURRENT_TASKS);
   const advisorTtl = positiveInteger(advisorSessionTtlMs, DEFAULT_ADVISOR_SESSION_TTL_MS);
   const noOutputTimeout = positiveInteger(noOutputTimeoutMs, DEFAULT_NO_OUTPUT_TIMEOUT_MS);
+  const postOutputNoOutputTimeout = positiveInteger(postOutputNoOutputTimeoutMs, DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS);
   const watchdogPoll = positiveInteger(watchdogPollMs, DEFAULT_WATCHDOG_POLL_MS);
+  const maxWait = positiveInteger(maxWaitMs, MAX_WAIT_MS);
   const keySlots = parseKeySlots(keySlotsSpec);
   const activityInterval = nonNegativeInteger(activityMinIntervalMs, 60000);
   const activityWords = positiveInteger(activityMaxWords, 200);
@@ -1166,6 +1175,19 @@ export function createTaskManager({
     // line from the previous read until it's completed by the next chunk.
     let bytesRead = 0;
     let carry = "";
+    // Two-phase no-output budget:
+    //   - Before the task has produced any parseable log event, the watcher
+    //     compares against `noOutputTimeout`. A task that is silent from the
+    //     start is most likely genuinely wedged (bad spawn, auth failure,
+    //     provider hang) and should die fast.
+    //   - The moment the watcher sees its first parseable JSON line in the
+    //     log, the latch flips and the deadline jumps to
+    //     `postOutputNoOutputTimeout` for the rest of the task's life.
+    //     Silence after real work is far more likely a long generation
+    //     (opencode writes step-level events, not token deltas, so a long
+    //     final answer can produce zero log lines for minutes) than a hang.
+    let outputSeen = false;
+    let currentNoOutputTimeout = noOutputTimeout;
     const timer = setInterval(() => {
       const current = tasks.get(task.id);
       if (!current || current.status !== "running") {
@@ -1205,13 +1227,22 @@ export function createTaskManager({
             }
           })) {
             lastActivityMs = Date.now();
+            // Latch the budget escalation: once any parseable JSON line has
+            // landed for this task, every subsequent tick compares against
+            // `postOutputNoOutputTimeout` regardless of how much later silence
+            // follows. This is the only assignment to either flag/variable
+            // outside their initializers, so the latch is unconditional.
+            if (!outputSeen) {
+              outputSeen = true;
+              currentNoOutputTimeout = postOutputNoOutputTimeout;
+            }
           }
           void scheduleActivity(current);
         }
       } catch {
         // A rotated or removed log is retried on the next watcher tick.
       }
-      if (Date.now() - lastActivityMs >= noOutputTimeout) {
+      if (Date.now() - lastActivityMs >= currentNoOutputTimeout) {
         failRunningTask(current, "no_output_timeout");
       }
     }, watchdogPoll);
@@ -1313,11 +1344,10 @@ export function createTaskManager({
    * @param {{timeoutMs?: number, tailChars?: number}} [options]
    * @returns {Promise<TaskStatus>}
    */
-  function poll(taskId, { timeoutMs = MAX_WAIT_MS, tailChars } = {}) {
+  function poll(taskId, { timeoutMs, tailChars } = {}) {
     ensureStateLoaded();
     const task = tasks.get(taskId);
     if (!task) throw noSuchTask(taskId);
-    const cappedMs = Math.min(timeoutMs, MAX_WAIT_MS);
     if (task.status !== "running" && task.status !== "queued") {
       return Promise.resolve(summarize(task));
     }
@@ -1343,7 +1373,7 @@ export function createTaskManager({
           outputTailTruncated: output.length > tailChars,
         });
       };
-      const timer = setTimeout(() => settle(true), cappedMs);
+      const timer = timeoutMs != null ? setTimeout(() => settle(true), timeoutMs) : undefined;
       if (!waiters.has(taskId)) waiters.set(taskId, []);
       /** @type {Array<(timedOut?: boolean) => void>} */ (waiters.get(taskId)).push(settle);
     });
@@ -1371,7 +1401,7 @@ export function createTaskManager({
     } catch (err) {
       throw new Error(errMessage(err).replaceAll("taskferry_dispatch", "taskferry_advisor"), { cause: err });
     }
-    const settled = await poll(dispatched.id, timeout_ms != null ? { timeoutMs: timeout_ms } : {});
+    const settled = await poll(dispatched.id, { timeoutMs: timeout_ms ?? maxWait });
 
     const resetFields = resolved.reset ? { previous_session_id: resolved.previousSessionId } : {};
 
