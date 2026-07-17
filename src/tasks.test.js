@@ -13,7 +13,7 @@ import { createTaskManager } from "./tasks.js";
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, onEvent } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, onEvent } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -36,6 +36,7 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     ...(advisorSessionTtlMs != null ? { advisorSessionTtlMs } : {}),
     ...(maxConcurrentTasks != null ? { maxConcurrentTasks } : {}),
     ...(noOutputTimeoutMs != null ? { noOutputTimeoutMs } : {}),
+    ...(postOutputNoOutputTimeoutMs != null ? { postOutputNoOutputTimeoutMs } : {}),
     ...(watchdogPollMs != null ? { watchdogPollMs } : {}),
     ...(maxWaitMs != null ? { maxWaitMs } : {}),
     ...(keySlotsSpec != null ? { keySlotsSpec } : {}),

@@ -251,6 +251,10 @@ const DEFAULT_NO_OUTPUT_TIMEOUT_MS = positiveInteger(
   Number(process.env.TASKFERRY_NO_OUTPUT_TIMEOUT_MS),
   120000
 );
+const DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS = positiveInteger(
+  Number(process.env.TASKFERRY_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS),
+  300000
+);
 const DEFAULT_WATCHDOG_POLL_MS = positiveInteger(
   Number(process.env.TASKFERRY_WATCHDOG_POLL_MS),
   2000
@@ -269,6 +273,7 @@ const WATCHDOG_KILL_GRACE_MS = 5000;
  * @param {number} [options.maxConcurrentTasks]
  * @param {number} [options.advisorSessionTtlMs]
  * @param {number} [options.noOutputTimeoutMs]
+ * @param {number} [options.postOutputNoOutputTimeoutMs]
  * @param {number} [options.watchdogPollMs]
  * @param {number} [options.maxWaitMs]
  * @param {string} [options.keySlotsSpec]
@@ -306,6 +311,7 @@ export function createTaskManager({
   maxConcurrentTasks = DEFAULT_MAX_CONCURRENT_TASKS,
   advisorSessionTtlMs = DEFAULT_ADVISOR_SESSION_TTL_MS,
   noOutputTimeoutMs = DEFAULT_NO_OUTPUT_TIMEOUT_MS,
+  postOutputNoOutputTimeoutMs = DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS,
   watchdogPollMs = DEFAULT_WATCHDOG_POLL_MS,
   maxWaitMs = MAX_WAIT_MS,
   keySlotsSpec = process.env.TASKFERRY_KEY_SLOTS,
@@ -327,6 +333,7 @@ export function createTaskManager({
   const concurrencyLimit = positiveInteger(maxConcurrentTasks, DEFAULT_MAX_CONCURRENT_TASKS);
   const advisorTtl = positiveInteger(advisorSessionTtlMs, DEFAULT_ADVISOR_SESSION_TTL_MS);
   const noOutputTimeout = positiveInteger(noOutputTimeoutMs, DEFAULT_NO_OUTPUT_TIMEOUT_MS);
+  const postOutputNoOutputTimeout = positiveInteger(postOutputNoOutputTimeoutMs, DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS);
   const watchdogPoll = positiveInteger(watchdogPollMs, DEFAULT_WATCHDOG_POLL_MS);
   const maxWait = positiveInteger(maxWaitMs, MAX_WAIT_MS);
   const keySlots = parseKeySlots(keySlotsSpec);
