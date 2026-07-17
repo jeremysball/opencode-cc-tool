@@ -56,6 +56,23 @@ export async function runCommand(command, options, { client, io = process, signa
         ...(options.graceMs === undefined ? {} : { graceMs: options.graceMs }),
       });
     case "wait": {
+      if (options.summarize) {
+        // do not close the client here: cli.js's top-level finally owns the
+        // lifecycle, and the trailing task.status RPC below needs the same
+        // open connection. (Unlike watchCommand, which closes after its single stream.)
+        const initial = await client.request("task.status", { taskId: options.taskId });
+        await streamTaskEvents({
+          client,
+          io,
+          signal,
+          directory: initial.directory,
+          taskId: options.taskId,
+          summaries: true,
+          format: "toon",
+        });
+        const detail = await client.request("task.status", { taskId: options.taskId });
+        return leanStatus(detail, { full: options.full });
+      }
       const detail = await client.request("task.wait", {
         taskId: options.taskId,
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
@@ -129,31 +146,81 @@ export async function runCommand(command, options, { client, io = process, signa
   }
 }
 
-async function watchCommand(options, { client, io, signal, cwd }) {
-  const directory = normalizeDirectory(options.directory || cwd);
-  let stop;
+const TERMINAL_STATUSES = new Set(["done", "crashed", "cancelled", "unknown"]);
+
+function terminalEventFromStatus(detail) {
+  return {
+    type: "task.state",
+    taskId: detail.id,
+    directory: detail.directory,
+    status: detail.status,
+    previousStatus: null,
+    occurredAt: new Date().toISOString(),
+    activity: null,
+    outputWatermark: null,
+  };
+}
+
+function streamTaskEvents({ client, io, signal, directory, taskId, summaries, format }) {
+  let settle;
+  let abortHandler;
   const finished = new Promise((resolve, reject) => {
     let settled = false;
-    stop = () => {
+    settle = (result) => {
       if (settled) return;
       settled = true;
-      resolve({ directory, watching: false });
+      resolve(result ?? { directory, watching: false });
     };
+    abortHandler = () => settle();
     if (signal?.aborted) {
-      stop();
+      settle();
       return;
     }
-    signal?.addEventListener("abort", stop, { once: true });
-    Promise.resolve(client.subscribe({ directory, ...(options.summaries ? { summaries: true } : {}) }, (event) => {
-      io.stdout.write(`${formatWatchEvent(event, options.format)}\n`);
-    })).catch((error) => {
+    signal?.addEventListener("abort", abortHandler, { once: true });
+    Promise.resolve(client.subscribe({ directory, ...(summaries ? { summaries: true } : {}) }, (event) => {
+      if (taskId && event.taskId !== taskId) return;
+      io.stdout.write(`${formatWatchEvent(event, format)}\n`);
+      if (taskId && TERMINAL_STATUSES.has(event.status)) {
+        settle({ directory, watching: false, event });
+      }
+    })).then(() => {
+      // Subscriptions only broadcast future transitions (no snapshot replay), so a task
+      // that was already terminal before subscribing, or that settled in the gap between
+      // resolving task.status above and the subscription actually registering, would
+      // otherwise never deliver a terminal event and hang forever.
+      if (!taskId || settled) return;
+      return client.request("task.status", { taskId }).then((detail) => {
+        if (settled || !TERMINAL_STATUSES.has(detail.status)) return;
+        const event = terminalEventFromStatus(detail);
+        io.stdout.write(`${formatWatchEvent(event, format)}\n`);
+        settle({ directory, watching: false, event });
+      });
+    }).catch((error) => {
       if (settled) return;
       settled = true;
       reject(error);
     });
   });
   return finished.finally(() => {
-    signal?.removeEventListener("abort", stop);
+    signal?.removeEventListener("abort", abortHandler);
+  });
+}
+
+async function watchCommand(options, { client, io, signal, cwd }) {
+  const directory = options.directory
+    ? normalizeDirectory(options.directory)
+    : options.taskId
+      ? normalizeDirectory((await client.request("task.status", { taskId: options.taskId })).directory)
+      : normalizeDirectory(cwd);
+  return streamTaskEvents({
+    client,
+    io,
+    signal,
+    directory,
+    taskId: options.taskId,
+    summaries: options.summaries,
+    format: options.format,
+  }).finally(() => {
     if (client.close) client.close();
   });
 }

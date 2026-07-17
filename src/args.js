@@ -42,8 +42,9 @@ const commandSpecs = {
       "--timeout-ms <number>": "maximum wait in milliseconds",
       "--tail-chars <number>": "include this many trailing text characters on timeout",
       "--full": "include directory, model, and log details",
+      "--summarize": "print periodic live summaries while waiting; exits when the task settles",
     },
-    examples: ['taskferry wait <id>', 'taskferry wait <id> --timeout-ms 10000 --tail-chars 1000'],
+    examples: ['taskferry wait <id>', 'taskferry wait <id> --timeout-ms 10000 --tail-chars 1000', 'taskferry wait <id> --summarize'],
   },
   advisor: {
     usage: "taskferry advisor --prompt <text> --model <id> [options]",
@@ -107,10 +108,11 @@ const commandSpecs = {
     description: "Stream task state events for a workspace.",
     options: {
       "--directory <path>": "workspace to watch, defaults to the current workspace",
+      "--task-id <id>": "scope the stream to one task; exits automatically once it settles",
       "--format toon|claude-monitor|ndjson": "stream format, default toon",
       "--summaries": "request activity summaries when available",
     },
-    examples: ['taskferry watch', 'taskferry watch --format claude-monitor', 'taskferry watch --format ndjson'],
+    examples: ['taskferry watch', 'taskferry watch --task-id <id> --summaries', 'taskferry watch --format ndjson'],
   },
   context: {
     usage: "taskferry context [options]",
@@ -241,7 +243,7 @@ function defaultOptions(command, cwd) {
     case "cancel":
       return { taskId: undefined, graceMs: undefined };
     case "wait":
-      return { taskId: undefined, timeoutMs: undefined, tailChars: undefined, full: false };
+      return { taskId: undefined, timeoutMs: undefined, tailChars: undefined, full: false, summarize: false };
     case "status":
       return { taskId: undefined, full: false };
     case "tail":
@@ -253,7 +255,7 @@ function defaultOptions(command, cwd) {
     case "list":
       return { directory: cwd, all: false, limit: undefined };
     case "watch":
-      return { directory: cwd, format: "toon", summaries: false };
+      return { directory: undefined, format: "toon", summaries: false, taskId: undefined };
     case "context":
       return { directory: cwd, format: "toon" };
     case "doctor":
@@ -311,13 +313,16 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       "--max_words": "--max_words was renamed; use --max-words",
       "--session_id": "--session_id was renamed; use --session-id",
     };
-    if (migrationFlags[name]) throw new UsageError(`unknown flag ${name} for \`${command}\``, migrationFlags[name]);
+    if (migrationFlags[name] && !(name === "--task-id" && command === "watch")) {
+      throw new UsageError(`unknown flag ${name} for \`${command}\``, migrationFlags[name]);
+    }
 
     const booleanCommands = {
       "--full": ["wait", "status", "result", "doctor"],
       "--all": ["list"],
       "--wait": ["summary"],
       "--summaries": ["watch"],
+      "--summarize": ["wait"],
     };
     if (booleanCommands[name]) {
       if (!booleanCommands[name].includes(command)) throw usageError(`unknown flag ${name} for \`${command}\``, command);
@@ -343,6 +348,7 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       "--fields": "fields",
       "--limit": "limit",
       "--format": "format",
+      "--task-id": "taskId",
     };
     const key = values[name];
     if (!key || !commandAllows(command, name)) throw usageError(`unknown flag ${name} for \`${command}\``, command);
@@ -375,6 +381,12 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
     if (command === "result" && options.full && options.fields && !options.fields.includes("narration")) {
       throw usageError("--full requires narration in --fields", command);
     }
+    if (command === "wait" && options.summarize && options.timeoutMs !== undefined) {
+      throw usageError("--summarize cannot be combined with --timeout-ms", command);
+    }
+    if (command === "wait" && options.summarize && options.tailChars !== undefined) {
+      throw usageError("--summarize cannot be combined with --tail-chars", command);
+    }
   }
   return { command, options, help, ...(help ? { helpText: helpText(command) } : {}) };
 }
@@ -390,7 +402,7 @@ function commandAllows(command, flag) {
     summary: ["--style", "--max-words"],
     result: ["--fields"],
     list: ["--directory", "--limit"],
-    watch: ["--directory", "--format"],
+    watch: ["--directory", "--format", "--task-id"],
     context: ["--directory", "--format"],
     doctor: [],
   };

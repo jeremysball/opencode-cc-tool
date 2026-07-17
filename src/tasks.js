@@ -1358,7 +1358,7 @@ export function createTaskManager({
           const idx = list.indexOf(settle);
           if (idx !== -1) list.splice(idx, 1);
         }
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         const current = /** @type {Task} */ (tasks.get(taskId));
         const summary = summarize(current);
         if (!timedOut || current.status !== "running" || tailChars == null) {

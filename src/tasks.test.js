@@ -975,6 +975,25 @@ describe("poll()", () => {
     assert.equal(settled.status, "done");
   });
 
+  test("with no timeoutMs, blocks until settlement instead of returning early", async () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    let resolved = false;
+    const waitPromise = mgr.poll(dispatched.id).then((settled) => {
+      resolved = true;
+      return settled;
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(resolved, false, "poll() must not resolve on its own without an explicit timeoutMs");
+
+    child.emit("exit", 0, null);
+    const settled = await waitPromise;
+    assert.equal(settled.status, "done");
+  });
+
   test("returns 'running' once its timeout elapses without an exit event", async () => {
     const child = fakeChild();
     const mgr = makeManager({ spawnFn: () => child });

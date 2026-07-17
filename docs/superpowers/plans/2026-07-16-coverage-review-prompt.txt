@@ -1,0 +1,71 @@
+Review only — do not edit any files.
+
+You are reviewing a coverage matrix that maps every item in two todo files
+against the implementation plans already on disk. The matrix was produced by
+a different model in an earlier, independent dispatch (not this session) and
+is saved at
+docs/superpowers/plans/2026-07-16-todo-coverage-matrix.md. Your job is to
+verify it: every "is covered" claim should be checkable against the plan;
+every "not covered" claim should be the result of an actual search, not an
+assumption. Treat the matrix as a candidate you have no reason to trust yet.
+If a row is wrong, correct it. If an item is missing, add it.
+
+Inputs (all under /workspace/taskferry):
+
+  - docs/superpowers/plans/2026-07-16-todo-coverage-matrix.md  (the matrix
+    under review — read this first)
+  - todo-07-15.txt  (26 lines, mix of feature requests + diagnostics work)
+  - todo-07-16.txt  (84 lines, 4 numbered bugs + smaller items, all observed
+                     in real dispatches on 2026-07-16)
+  - docs/superpowers/plans/2026-07-14-dispatch-reliability.md  (10 tasks)
+  - docs/superpowers/plans/2026-07-14-taskferry-advisor.md       (4 tasks)
+  - docs/superpowers/plans/2026-07-15-taskferry-axi-cli.md      (12 tasks)
+  - docs/superpowers/plans/2026-07-15-taskferry-brand-prototype.md
+  - docs/superpowers/plans/2026-07-16-taskferry-setup.md        (3 tasks)
+  - docs/superpowers/plans/2026-07-16-watchdog-output-escalation.md (3 tasks)
+
+Decision rules the matrix is supposed to apply:
+
+  1. A todo item is "covered" only if a plan task will produce code or
+     documented behavior that satisfies it as written. "Adjacent work"
+     does not count. Example: dispatch-reliability Task 6 classifies
+     `provider_usage_exhausted` — that does not cover todo-07-15 #14's
+     `rate_limited` bucket unless the plan explicitly maps it.
+  2. A plan task is "covered" only if it would still do the right thing
+     given the actual code on `main` (src/tasks.js in particular). Spot
+     any plan whose premise no longer matches the current code.
+  3. Anything in continuation-watchdog-escalation.md's "Still unfixed,
+     not yet planned" section is by definition uncovered — but only if
+     that section is itself accurate. Verify it against the current
+     source.
+
+What "wrong" looks like — flag any of:
+
+  - A todo item marked "covered" that no plan task actually addresses.
+  - A todo item marked "not covered" that some plan task does address
+    (read all six plans end-to-end; the matrix's author may have stopped
+    after skimming).
+  - A plan that has been merged or partially implemented such that its
+    remaining work is smaller than the matrix assumes. Use `git log
+    --oneline -- <plan-files>` and grep src/ for symbols the plan
+    promises.
+  - A todo item that is duplicated between the two files (e.g., watchdog
+    budgeting appears in both) and the matrix double-counts or misses
+    the dedup.
+  - An item that is actually already fixed in the working tree but still
+    listed in the todo.
+
+Deliverable, in this order:
+
+  1. One-line verdict: MATRIX ACCURATE / MATRIX NEEDS CORRECTIONS.
+  2. Table of corrections: for each row you'd change, the todo item,
+     the matrix's claim, the corrected claim, and the plan:line or
+     src/ file:line evidence.
+  3. Items the matrix missed entirely, with the same evidence format.
+  4. If you discover that a listed plan is already partially implemented,
+     note which tasks are still genuinely open vs. already done.
+
+Do not propose new plans or new fixes. This is a coverage audit, not a
+design exercise. Save your findings to
+/workspace/taskferry/docs/superpowers/plans/2026-07-16-todo-coverage-review.md
+and reply with its path.
