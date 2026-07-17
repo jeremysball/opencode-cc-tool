@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs, UsageError } from "./args.js";
@@ -75,9 +76,17 @@ async function main() {
   process.exitCode = result.exitCode;
 }
 
-if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (process.argv[1] && resolveInvokedPath(process.argv[1]) === fileURLToPath(import.meta.url)) {
   main().catch((error) => {
     writeError(error);
     process.exitCode = 1;
   });
+}
+
+function resolveInvokedPath(invoked) {
+  try {
+    return fs.realpathSync(invoked);
+  } catch {
+    return path.resolve(invoked);
+  }
 }

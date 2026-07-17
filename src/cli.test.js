@@ -1,9 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { decode } from "@toon-format/toon";
+import { fileURLToPath } from "node:url";
 import { runCli } from "./cli.js";
 
 function capturedIo() {
@@ -288,4 +290,21 @@ test("summary --wait proceeds to summarize once task.wait reports a settled stat
     { method: "task.wait", params: { taskId: "oc_1" } },
     { method: "task.summary", params: { taskId: "oc_1" } },
   ]);
+});
+
+test("executes main() when invoked through a symlink to src/cli.js", (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-cli-symlink-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const realCli = fileURLToPath(new URL("./cli.js", import.meta.url));
+  const link = path.join(root, "taskferry");
+  fs.symlinkSync(realCli, link, "file");
+
+  const result = execFileSync(process.execPath, [link, "--version"], {
+    cwd: path.dirname(realCli),
+    encoding: "utf8",
+  });
+  const value = decode(result.trim());
+  assert.equal(value.name, "taskferry");
+  assert.equal(typeof value.version, "string");
+  assert.equal(value.version.length > 0, true);
 });
