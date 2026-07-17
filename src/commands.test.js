@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { runCommand } from "./commands.js";
 
 function fakeIo() {
@@ -25,6 +28,7 @@ function fakeClient({ onSubscribe } = {}) {
 }
 
 test("watch prints each event through formatWatchEvent and resolves on abort", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
   const controller = new AbortController();
   let deliver;
   const client = fakeClient({
@@ -34,18 +38,18 @@ test("watch prints each event through formatWatchEvent and resolves on abort", a
   });
   const io = fakeIo();
 
-  const pending = runCommand("watch", { directory: "/workspace/project", format: "toon", summaries: false }, {
+  const pending = runCommand("watch", { directory: root, format: "toon", summaries: false }, {
     client,
     io,
     signal: controller.signal,
-    cwd: "/workspace/project",
+    cwd: root,
   });
 
-  deliver({ sequence: 1, type: "task.state", taskId: "oc_1", directory: "/workspace/project", status: "running" });
+  deliver({ sequence: 1, type: "task.state", taskId: "oc_1", directory: root, status: "running" });
   controller.abort();
   const result = await pending;
 
-  assert.equal(result.directory, "/workspace/project");
+  assert.equal(result.directory, root);
   assert.equal(result.watching, false);
   assert.equal(io.lines.length, 1);
   assert.match(io.lines[0], /oc_1/);
