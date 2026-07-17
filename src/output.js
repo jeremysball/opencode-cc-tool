@@ -86,7 +86,9 @@ export function leanStatus(detail, { full = false } = {}) {
   }
   lean.next = status === "running" || status === "queued"
     ? `Run taskferry wait or taskferry status with task id "${id}" to check progress; pass --full for directory/model/log path details`
-    : `Run taskferry result with task id "${id}" to see the final message; pass --full here for directory/model/log path details`;
+    : status === "crashed" && detail.sessionId
+      ? `Session "${detail.sessionId}" may be salvageable; resume with taskferry dispatch --session-id "${detail.sessionId}" --directory "${detail.directory}" --prompt "<continuation prompt>"`
+      : `Run taskferry result with task id "${id}" to see the final message; pass --full here for directory/model/log path details`;
   return lean;
 }
 
