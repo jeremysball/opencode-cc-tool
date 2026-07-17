@@ -116,6 +116,15 @@ describe("private daemon protocol", () => {
     );
   });
 
+  test("accepts task.result with failureDetail in params.fields", () => {
+    const parsed = parseRequestLine(request("task.result", { taskId: "oc_123", fields: ["failureDetail"] }));
+    assert.deepEqual(parsed.params.fields, ["failureDetail"]);
+    assert.throws(
+      () => parseRequestLine(request("task.result", { taskId: "oc_123", fields: ["failureDetail", "notAResultField"] })),
+      (error) => error instanceof ProtocolError && error.code === "INVALID_PARAMS"
+    );
+  });
+
   test("constructs exact response and event envelopes", () => {
     assert.deepEqual(successResponse("req-1", { healthy: true }), {
       version: 1,
