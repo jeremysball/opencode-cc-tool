@@ -33,35 +33,18 @@ TIER 0: BLOCKED — FIX PREMISE BEFORE ANY WORK STARTS
 TIER VR: VERY REQUESTED — TOP PRIORITY
 =======================================
 
-[_] Failure detail field
-    Status: unplanned
-    Details: richer error context alongside failureReason; surface from
-             wait/status --full/result --full
-    Plan: (none) — needs design
-
-[_] Error classification (4-bucket system)
-    Status: unplanned
-    Details: authentication_failed, payment_required, rate_limited,
-             no_output_timeout — only no_output_timeout exists today
-    Plan: (none) — needs design
-
-[_] Resume command hints on no_output_timeout crash
-    Status: unplanned
-    Details: prefill `--session-id` in the `next` hint when a task dies with
-             a salvageable sessionId
-    Plan: (none) — needs design
-
-[_] Final marker validation
-    Status: unplanned
-    Details: enforce that a task told to end with `Status:` actually did;
-             flip status when the marker is absent
-    Plan: (none) — needs design
-
-[_] Empty message handling
-    Status: unplanned
-    Details: a task can settle `done`/exit 0 with an empty final message —
-             detect and flag this instead of reporting clean success
-    Plan: (none) — needs design
+[X] Error classification, failure detail, and resume hints
+    Status: shipped, on fix/summarize-followups
+    Details: provider_usage_exhausted split into rate_limited/
+             payment_required/authentication_failed, ordered
+             most-specific-first to resolve real-world pattern overlap.
+             New failureDetail field (matched log line, capped 500 chars,
+             or the fired timeout for no_output_timeout) surfaced via
+             --full and result --fields, deduped through a shared
+             failureFields() helper. leanStatus's next hint on a crashed
+             task with a salvageable sessionId now includes the resume
+             command, for any failureReason bucket. Docs updated in
+             daemon.md, troubleshooting.md, cli-reference.md.
 
 
 TIER IMPORTANT: STANDALONE FEATURES
