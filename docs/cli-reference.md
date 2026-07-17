@@ -80,6 +80,7 @@ returns after that many milliseconds even if the task is still running.
 | `--timeout-ms <number>` | Optional early-return cap in milliseconds; omit to block until settlement |
 | `--tail-chars <number>` | Include this many trailing narration characters if the task is still running when the timeout elapses |
 | `--full` | Include directory, model, session id, log path, and prompt preview |
+| `--summarize` | Stream periodic live summaries to stdout while waiting; exits and returns the normal result the moment the task settles. Cannot combine with `--timeout-ms` or `--tail-chars`. |
 
 If it returns `status: "queued"` or `"running"`, an explicit `--timeout-ms`
 elapsed before the task settled; call `wait` again. This command was named
@@ -94,6 +95,11 @@ exitCode: 0
 signal: null
 next: Run taskferry result with task id "oc_mrn4ipkp_19450105" to see the final message; pass --full here for directory/model/log path details
 ```
+
+`--summarize` is for a human watching a live terminal, not for scripts or
+agents: the periodic lines print as the wait progresses, and the final
+line is the same TOON block plain `wait` always returns, so anything
+parsing that final output sees no shape change.
 
 ## `taskferry advisor --prompt <text> --model <id> [options]`
 
@@ -216,6 +222,11 @@ SIGTERM), then exits cleanly with code `0`.
 | `--directory <path>` | Workspace to watch, defaults to the current workspace |
 | `--format toon\|claude-monitor\|ndjson` | Stream format, default `toon` |
 | `--summaries` | Request live activity summaries (a secondary model call); see [security.md](security.md) |
+| `--task-id <id>` | Scope the stream to one task; `watch` then exits on its own once that task settles, instead of running until interrupted |
+
+Without `--task-id`, `watch` streams every task in the workspace until
+interrupted. With it, `--directory` is optional — it's resolved from the
+task itself when omitted.
 
 `ndjson` emits one JSON object per line, for scripting. `claude-monitor`
 emits `Taskferry(<status> · <id>): <activity>` lines, the format Claude

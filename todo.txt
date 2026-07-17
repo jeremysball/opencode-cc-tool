@@ -67,11 +67,16 @@ TIER VR: VERY REQUESTED — TOP PRIORITY
 TIER IMPORTANT: STANDALONE FEATURES
 ====================================
 
-[_] LLM progress summaries (wait --summarize)
-    Status: unplanned
-    Details: optional flag on wait/status to condense narration tail into a
-             one-line "what's happening now" via a small configurable model
-    Plan: (none) — needs design
+[X] LLM progress summaries (wait --summarize)
+    Status: shipped — on worktree-taskferry-summarizer (91b2469)
+    Details: `taskferry wait --summarize` streams periodic one-line
+             summaries of the running task's narration tail while waiting
+             (via the same activity-summary model `watch --summaries`
+             uses), and returns the same TOON status block plain `wait`
+             returns the moment the task settles. Mutually exclusive with
+             --timeout-ms and --tail-chars. Tests added in args.test.js
+             and commands.test.js. Docs in docs/cli-reference.md (wait
+             section).
 
 [_] Tool selection for dispatch
     Status: unplanned
