@@ -646,8 +646,8 @@ describe("no-output watchdog", () => {
   });
 });
 
-describe("provider-usage-exhaustion detection", () => {
-  test("a rate-limit diagnostic in the log stops the child early with failureReason provider_usage_exhausted", async () => {
+describe("provider-failure classification", () => {
+  test("a rate-limit diagnostic in the log stops the child early with failureReason rate_limited and captures failureDetail", async () => {
     const child = fakeChild(7101);
     const killed = [];
     const mgr = makeManager({
@@ -666,10 +666,12 @@ describe("provider-usage-exhaustion detection", () => {
     assert.ok(killed.some((k) => k.signal === "SIGTERM"));
 
     child.emit("exit", null, "SIGTERM");
-    assert.equal(mgr.status(dispatched.id).failureReason, "provider_usage_exhausted");
+    const s = mgr.status(dispatched.id, { full: true });
+    assert.equal(s.failureReason, "rate_limited");
+    assert.equal(s.failureDetail, "rate_limit_exceeded: please retry after 60s");
   });
 
-  test("an unterminated provider exhaustion diagnostic stops the child early", async () => {
+  test("an unterminated rate-limit diagnostic stops the child early", async () => {
     const child = fakeChild(7104);
     const killed = [];
     const mgr = makeManager({
@@ -685,7 +687,9 @@ describe("provider-usage-exhaustion detection", () => {
     assert.ok(killed.some((k) => k.signal === "SIGTERM"));
 
     child.emit("exit", null, "SIGTERM");
-    assert.equal(mgr.status(dispatched.id).failureReason, "provider_usage_exhausted");
+    const s = mgr.status(dispatched.id, { full: true });
+    assert.equal(s.failureReason, "rate_limited");
+    assert.equal(s.failureDetail, "rate limit exceeded");
   });
 
   test("status still lands on crashed when the SIGTERM'd child exits 0 (traps the signal) instead of dying by signal", async () => {
@@ -712,20 +716,22 @@ describe("provider-usage-exhaustion detection", () => {
     child.emit("exit", 0, null);
     const s = mgr.status(dispatched.id);
     assert.equal(s.status, "crashed");
-    assert.equal(s.failureReason, "provider_usage_exhausted");
+    assert.equal(s.failureReason, "rate_limited");
   });
 
-  test("ordinary crash text is not misclassified as provider exhaustion", () => {
+  test("ordinary crash text is not misclassified as a provider failure", () => {
     const child = fakeChild(7102);
     const mgr = makeManager({ spawnFn: () => child, killFn: () => {} });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
     fs.writeFileSync(mgr.status(dispatched.id).logPath, "TypeError: cannot read property 'x' of undefined\n");
     child.emit("exit", 1, null);
-    assert.equal(mgr.status(dispatched.id).status, "crashed");
-    assert.equal(mgr.status(dispatched.id).failureReason, null);
+    const s = mgr.status(dispatched.id, { full: true });
+    assert.equal(s.status, "crashed");
+    assert.equal(s.failureReason, null);
+    assert.equal(s.failureDetail, null);
   });
 
-  test("a type:\"text\" narration event that legitimately mentions rate limits, quotas, or 429 is not misclassified as provider exhaustion (GLM-5.2 review finding)", async () => {
+  test("a type:\"text\" narration event that legitimately mentions rate limits, quotas, or 429 is not misclassified as a provider failure (GLM-5.2 review finding)", async () => {
     const child = fakeChild(7103);
     const killed = [];
     const mgr = makeManager({
@@ -746,6 +752,171 @@ describe("provider-usage-exhaustion detection", () => {
     await new Promise((r) => setTimeout(r, 40));
     assert.equal(killed.length, 0);
     assert.equal(mgr.status(dispatched.id).failureReason, null);
+  });
+
+  test("insufficient_quota lands on payment_required, not rate_limited", async () => {
+    const child = fakeChild(7106);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 60000,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      JSON.stringify({ type: "error", message: "insufficient_quota: your account has run out of credits" }) + "\n"
+    );
+
+    await new Promise((r) => setTimeout(r, 40));
+    assert.ok(killed.some((k) => k.signal === "SIGTERM"));
+
+    child.emit("exit", null, "SIGTERM");
+    const s = mgr.status(dispatched.id, { full: true });
+    assert.equal(s.failureReason, "payment_required");
+    assert.equal(s.failureDetail, "insufficient_quota: your account has run out of credits");
+  });
+
+  test("a line combining insufficient_quota and rate-limit language resolves to payment_required (checked first)", async () => {
+    const child = fakeChild(7107);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 60000,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      JSON.stringify({ type: "error", message: "rate limit exceeded: insufficient_quota on this key" }) + "\n"
+    );
+
+    await new Promise((r) => setTimeout(r, 40));
+    child.emit("exit", null, "SIGTERM");
+    assert.equal(mgr.status(dispatched.id).failureReason, "payment_required");
+  });
+
+  test("a line mentioning quota alongside rate-limit language, without insufficient_quota, resolves to rate_limited (bare quota's fallback bucket)", async () => {
+    const child = fakeChild(7108);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 60000,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      JSON.stringify({ type: "error", message: "Rate limit exceeded, check your quota" }) + "\n"
+    );
+
+    await new Promise((r) => setTimeout(r, 40));
+    child.emit("exit", null, "SIGTERM");
+    assert.equal(mgr.status(dispatched.id).failureReason, "rate_limited");
+  });
+
+  test("unauthorized/invalid api key diagnostics land on authentication_failed", async () => {
+    const child = fakeChild(7109);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 60000,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      JSON.stringify({ type: "error", message: "Unauthorized: invalid API key provided" }) + "\n"
+    );
+
+    await new Promise((r) => setTimeout(r, 40));
+    child.emit("exit", null, "SIGTERM");
+    const s = mgr.status(dispatched.id, { full: true });
+    assert.equal(s.failureReason, "authentication_failed");
+    assert.equal(s.failureDetail, "Unauthorized: invalid API key provided");
+  });
+
+  test("a raw non-JSON line with an unrelated 3-digit number is not misclassified as authentication_failed", () => {
+    const child = fakeChild(7110);
+    const mgr = makeManager({ spawnFn: () => child, killFn: () => {} });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(mgr.status(dispatched.id).logPath, "401 tests passed, 0 failed\n");
+    child.emit("exit", 1, null);
+    assert.equal(mgr.status(dispatched.id).failureReason, null);
+  });
+
+  test("a structured status_code: 401 diagnostic without the word 'unauthorized' still lands on authentication_failed", async () => {
+    const child = fakeChild(7111);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 60000,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      JSON.stringify({ type: "error", message: "request failed with status_code: 401" }) + "\n"
+    );
+
+    await new Promise((r) => setTimeout(r, 40));
+    child.emit("exit", null, "SIGTERM");
+    assert.equal(mgr.status(dispatched.id).failureReason, "authentication_failed");
+  });
+
+  test("no_output_timeout captures which timeout fired and the pre/post-output latch state in failureDetail", async () => {
+    const child = fakeChild(7112);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 20,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    await new Promise((r) => setTimeout(r, 40));
+    assert.ok(killed.some((k) => k.signal === "SIGTERM"));
+
+    child.emit("exit", null, "SIGTERM");
+    const s = mgr.status(dispatched.id, { full: true });
+    assert.equal(s.failureReason, "no_output_timeout");
+    assert.equal(s.failureDetail, "no output for 20ms (pre-output timeout)");
+  });
+
+  test("failureReason and failureDetail are set once; a second watchdog tick does not overwrite either", async () => {
+    const child = fakeChild(7113);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 60000,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n"
+    );
+    await new Promise((r) => setTimeout(r, 20));
+
+    // Append a second, different diagnostic after the first tick has almost
+    // certainly already classified and started killing the task.
+    fs.appendFileSync(
+      mgr.status(dispatched.id).logPath,
+      JSON.stringify({ type: "error", message: "Unauthorized: invalid API key provided" }) + "\n"
+    );
+    await new Promise((r) => setTimeout(r, 20));
+
+    child.emit("exit", null, "SIGTERM");
+    const s = mgr.status(dispatched.id, { full: true });
+    assert.equal(s.failureReason, "rate_limited", "the first classification wins");
+    assert.equal(s.failureDetail, "rate_limit_exceeded: please retry after 60s");
   });
 });
 

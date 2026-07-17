@@ -38,6 +38,7 @@ import { withFileLock } from "./state-lock.js";
  * @property {boolean} cancelRequested
  * @property {boolean} internal
  * @property {string|null} [failureReason]
+ * @property {string|null} [failureDetail]
  * @property {string|null} [keySlot]
  * @property {SummaryOf} [summaryOf]
  */
@@ -60,6 +61,7 @@ import { withFileLock } from "./state-lock.js";
  * @property {SummaryOf} [summaryOf]
  * @property {boolean} cancelRequested
  * @property {string|null} [failureReason]
+ * @property {string|null} [failureDetail]
  * @property {string|null} [keySlot]
  */
 
@@ -109,6 +111,7 @@ import { withFileLock } from "./state-lock.js";
  * @property {NodeJS.Signals|null} [signal]
  * @property {string|null} [spawnError]
  * @property {string|null} [failureReason]
+ * @property {string|null} [failureDetail]
  * @property {string|null} [keySlot]
  * @property {string|null} [sessionId]
  * @property {unknown} [tokens]
@@ -135,38 +138,88 @@ const SUMMARY_PREFLIGHT_TIMEOUT_MS = 10000;
 const RESULT_FIELDS = new Set(["message", "narration", "tokens", "cost", "sessionId", "exitCode", "signal", "spawnError", "failureReason", "keySlot", "logPath"]);
 const execFileAsync = promisify(execFile);
 
-const PROVIDER_EXHAUSTION_PATTERNS = [
+// Ordered most-specific-first: real provider error text often combines
+// more than one signal (e.g. "Rate limit exceeded, check your quota"), so
+// the first bucket in this order that matches wins, rather than whichever
+// pattern happens to be listed first in a flat scan.
+//
+// payment_required: `insufficient_quota` and `payment required`/`billing`
+// are unambiguous billing signals that never mean "retry later works" the
+// way a rate-limit message does.
+const PAYMENT_REQUIRED_PATTERNS = [
+  /insufficient_quota/i,
+  /payment.?required/i,
+  /\bbilling\b/i,
+  /status(_code)?[:\s=]+402\b/i,
+];
+// authentication_failed: `unauthorized` / `invalid api key` are unambiguous
+// auth signals. The bare 401 variant requires a `status`/`status_code`
+// prefix rather than matching `\b401\b` on its own: a raw non-JSON log line
+// (the noisiest scanning surface this classifier covers) can contain an
+// unrelated 3-digit number (a byte count, a line number, a test count)
+// that would otherwise false-positive.
+const AUTHENTICATION_FAILED_PATTERNS = [
+  /unauthorized/i,
+  /invalid.api.?key/i,
+  /authentication.?failed/i,
+  /status(_code)?[:\s=]+401\b/i,
+];
+// rate_limited: the broadest, most generic bucket, checked last. Bare
+// `quota` (without `insufficient_quota` or another payment_required
+// signal) lands here deliberately: providers use "quota" for rate/usage
+// budgets far more often than for billing failures, so an ambiguous bare
+// mention defaults to the safer "transient, retry later" interpretation.
+const RATE_LIMITED_PATTERNS = [
   /rate.?limit/i,
-  /\bquota\b/i,
   /usage.?limit/i,
   /too many requests/i,
   /\b429\b/i,
-  /insufficient_quota/i,
+  /\bquota\b/i,
 ];
 
+const PROVIDER_FAILURE_BUCKETS = [
+  /** @type {[string, RegExp[]]} */ (["payment_required", PAYMENT_REQUIRED_PATTERNS]),
+  /** @type {[string, RegExp[]]} */ (["authentication_failed", AUTHENTICATION_FAILED_PATTERNS]),
+  /** @type {[string, RegExp[]]} */ (["rate_limited", RATE_LIMITED_PATTERNS]),
+];
+
+const FAILURE_DETAIL_MAX_CHARS = 500;
+
+/** @param {string} text */
+function capDetail(text) {
+  return text.length > FAILURE_DETAIL_MAX_CHARS ? text.slice(0, FAILURE_DETAIL_MAX_CHARS) + "…" : text;
+}
+
 // Scoped to opencode's own structured `type:"error"` events and raw
-// non-JSON lines (stderr, crash text) -- never a `type:"text"` event's
+// non-JSON lines (stderr, crash text), never a `type:"text"` event's
 // content. Those events are the model's own narration and routinely
 // contain these same words in unrelated, healthy output (writing
 // rate-limit-handling code, narrating "the server returned 429, retry
 // with backoff"); scanning the whole raw log killed tasks mid-run on that
 // false-positive surface (GLM-5.2 review of 0d944df..4e75129, finding 1).
-/** @param {string[]} lines */
-function detectProviderExhaustion(lines) {
+/**
+ * @param {string[]} lines
+ * @returns {{bucket: string, detail: string} | null}
+ */
+function classifyProviderFailure(lines) {
   for (const line of lines) {
     if (!line.trim()) continue;
     let evt;
     try {
       evt = JSON.parse(line);
     } catch {
-      if (PROVIDER_EXHAUSTION_PATTERNS.some((pattern) => pattern.test(line))) return true;
+      for (const [bucket, patterns] of PROVIDER_FAILURE_BUCKETS) {
+        if (patterns.some((pattern) => pattern.test(line))) return { bucket, detail: capDetail(line) };
+      }
       continue;
     }
     if (evt.type !== "error") continue;
     const text = typeof evt.message === "string" ? evt.message : JSON.stringify(evt);
-    if (PROVIDER_EXHAUSTION_PATTERNS.some((pattern) => pattern.test(text))) return true;
+    for (const [bucket, patterns] of PROVIDER_FAILURE_BUCKETS) {
+      if (patterns.some((pattern) => pattern.test(text))) return { bucket, detail: capDetail(text) };
+    }
   }
-  return false;
+  return null;
 }
 
 const SUMMARY_AGENT_CONFIG = JSON.stringify({
@@ -574,10 +627,11 @@ export function createTaskManager({
    * @returns {TaskSummary}
    */
   function summarize(task) {
-    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, failureReason, keySlot } = task;
+    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, failureReason, failureDetail, keySlot } = task;
     return {
       id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath,
       failureReason: failureReason ?? null,
+      failureDetail: failureDetail ?? null,
       keySlot: keySlot ?? null,
       promptPreview,
       ...(promptTotalChars != null ? { promptTotalChars } : {}),
@@ -701,6 +755,7 @@ export function createTaskManager({
       cancelRequested: false,
       internal: internal === true,
       failureReason: null,
+      failureDetail: null,
       keySlot: resolvedKeySlot.keySlot,
     };
     tasks.set(id, task);
@@ -917,6 +972,7 @@ export function createTaskManager({
       cancelRequested: false,
       internal: true,
       failureReason: null,
+      failureDetail: null,
       summaryOf,
     };
     tasks.set(id, task);
@@ -1154,10 +1210,12 @@ export function createTaskManager({
   /**
    * @param {Task} task
    * @param {string} failureReason
+   * @param {string} [failureDetail]
    */
-  function failRunningTask(task, failureReason) {
+  function failRunningTask(task, failureReason, failureDetail) {
     if (task.failureReason) return; // already stopping this task
     task.failureReason = failureReason;
+    task.failureDetail = failureDetail ?? null;
     stopRunningWatcher(task.id);
     try {
       persistTask(task.id);
@@ -1221,8 +1279,10 @@ export function createTaskManager({
           const text = carry + buf.toString("utf8");
           const lines = text.split("\n");
           carry = lines.pop() ?? "";
-          if (detectProviderExhaustion(lines) || (carry && !carry.trimStart().startsWith("{") && detectProviderExhaustion([carry]))) {
-            failRunningTask(current, "provider_usage_exhausted");
+          const providerFailure = classifyProviderFailure(lines)
+            ?? (carry && !carry.trimStart().startsWith("{") ? classifyProviderFailure([carry]) : null);
+          if (providerFailure) {
+            failRunningTask(current, providerFailure.bucket, providerFailure.detail);
             return;
           }
           if (lines.some((line) => {
@@ -1250,7 +1310,7 @@ export function createTaskManager({
         // A rotated or removed log is retried on the next watcher tick.
       }
       if (Date.now() - lastActivityMs >= currentNoOutputTimeout) {
-        failRunningTask(current, "no_output_timeout");
+        failRunningTask(current, "no_output_timeout", `no output for ${currentNoOutputTimeout}ms (${outputSeen ? "post-output" : "pre-output"} timeout)`);
       }
     }, watchdogPoll);
     // Same as child.unref() in startTask: the watchdog is a background
