@@ -622,16 +622,15 @@ export function createTaskManager({
     if (task) taskEvents.emitState(task);
   }
 
-  /**
-   * @param {Task} task
-   * @returns {TaskSummary}
-   */
   /** @param {Task} task */
   function failureFields(task) {
     return { failureReason: task.failureReason ?? null, failureDetail: task.failureDetail ?? null };
   }
 
-  /** @param {Task} task */
+  /**
+   * @param {Task} task
+   * @returns {TaskSummary}
+   */
   function summarize(task) {
     const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, keySlot } = task;
     return {
