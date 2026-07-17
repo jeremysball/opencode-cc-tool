@@ -115,3 +115,39 @@ test("watch --task-id resolves --directory from the task when omitted, and exits
   assert.equal(result.event.status, "crashed");
   assert.equal(client.closed.value, true);
 });
+
+test("wait --summarize streams summaries then returns the same shape as plain wait", async () => {
+  let deliver;
+  const statusCalls = [];
+  const client = fakeClient({
+    onSubscribe: (_params, onEvent) => {
+      deliver = onEvent;
+    },
+  });
+  client.request = async (method, params) => {
+    if (method === "task.status") {
+      statusCalls.push(params.taskId);
+      return statusCalls.length === 1
+        ? { directory: "/workspace/project" }
+        : { id: "oc_5", status: "done", startedAt: "2026-07-17T00:00:00.000Z", exitCode: 0, signal: null };
+    }
+    throw new Error(`unexpected request: ${method}`);
+  };
+  const io = fakeIo();
+
+  const pending = runCommand("wait", { taskId: "oc_5", timeoutMs: undefined, tailChars: undefined, full: false, summarize: true }, {
+    client,
+    io,
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+
+  deliver({ sequence: 1, type: "task.state", taskId: "oc_5", directory: "/workspace/project", status: "running", activity: "reading files" });
+  deliver({ sequence: 2, type: "task.state", taskId: "oc_5", directory: "/workspace/project", status: "done" });
+
+  const result = await pending;
+  assert.equal(result.id, "oc_5");
+  assert.equal(result.status, "done");
+  assert.equal(io.lines.length, 2, "both the running and done events should print");
+  assert.equal(client.closed.value, false, "wait must not close the client itself; cli.js closes it");
+});

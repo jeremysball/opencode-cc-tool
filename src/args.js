@@ -42,8 +42,9 @@ const commandSpecs = {
       "--timeout-ms <number>": "maximum wait in milliseconds",
       "--tail-chars <number>": "include this many trailing text characters on timeout",
       "--full": "include directory, model, and log details",
+      "--summarize": "print periodic live summaries while waiting; exits when the task settles",
     },
-    examples: ['taskferry wait <id>', 'taskferry wait <id> --timeout-ms 10000 --tail-chars 1000'],
+    examples: ['taskferry wait <id>', 'taskferry wait <id> --timeout-ms 10000 --tail-chars 1000', 'taskferry wait <id> --summarize'],
   },
   advisor: {
     usage: "taskferry advisor --prompt <text> --model <id> [options]",
@@ -242,7 +243,7 @@ function defaultOptions(command, cwd) {
     case "cancel":
       return { taskId: undefined, graceMs: undefined };
     case "wait":
-      return { taskId: undefined, timeoutMs: undefined, tailChars: undefined, full: false };
+      return { taskId: undefined, timeoutMs: undefined, tailChars: undefined, full: false, summarize: false };
     case "status":
       return { taskId: undefined, full: false };
     case "tail":
@@ -321,6 +322,7 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       "--all": ["list"],
       "--wait": ["summary"],
       "--summaries": ["watch"],
+      "--summarize": ["wait"],
     };
     if (booleanCommands[name]) {
       if (!booleanCommands[name].includes(command)) throw usageError(`unknown flag ${name} for \`${command}\``, command);
@@ -378,6 +380,12 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
     if (command === "advisor" && !options.model) throw usageError("--model is required", command);
     if (command === "result" && options.full && options.fields && !options.fields.includes("narration")) {
       throw usageError("--full requires narration in --fields", command);
+    }
+    if (command === "wait" && options.summarize && options.timeoutMs !== undefined) {
+      throw usageError("--summarize cannot be combined with --timeout-ms", command);
+    }
+    if (command === "wait" && options.summarize && options.tailChars !== undefined) {
+      throw usageError("--summarize cannot be combined with --tail-chars", command);
     }
   }
   return { command, options, help, ...(help ? { helpText: helpText(command) } : {}) };

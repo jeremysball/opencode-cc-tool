@@ -56,6 +56,20 @@ export async function runCommand(command, options, { client, io = process, signa
         ...(options.graceMs === undefined ? {} : { graceMs: options.graceMs }),
       });
     case "wait": {
+      if (options.summarize) {
+        const initial = await client.request("task.status", { taskId: options.taskId });
+        await streamTaskEvents({
+          client,
+          io,
+          signal,
+          directory: initial.directory,
+          taskId: options.taskId,
+          summaries: true,
+          format: "toon",
+        });
+        const detail = await client.request("task.status", { taskId: options.taskId });
+        return leanStatus(detail, { full: options.full });
+      }
       const detail = await client.request("task.wait", {
         taskId: options.taskId,
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),

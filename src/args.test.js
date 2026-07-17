@@ -35,7 +35,7 @@ test("parses dispatch and applies its argument defaults", () => {
 test("parses each command's required arguments and defaults", () => {
   const cwd = "/workspace/project";
   assert.equal(parseArgs(["cancel", "oc_1"]).options.taskId, "oc_1");
-  assert.deepEqual(parseArgs(["wait", "oc_1"]).options, { taskId: "oc_1", timeoutMs: undefined, tailChars: undefined, full: false });
+  assert.deepEqual(parseArgs(["wait", "oc_1"]).options, { taskId: "oc_1", timeoutMs: undefined, tailChars: undefined, full: false, summarize: false });
   assert.equal(parseArgs(["advisor", "--prompt", "help", "--model", "test/model"], { cwd }).options.directory, cwd);
   assert.equal(parseArgs(["status", "oc_1"]).options.full, false);
   assert.equal(parseArgs(["tail", "oc_1"]).options.chars, undefined);
@@ -163,4 +163,16 @@ test("rejects empty option values and trailing global arguments as usage errors"
   assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--model", ""]), /--model requires a non-empty value/);
   assert.throws(() => parseArgs(["--version", "extra"]), /unexpected argument: extra/);
   assert.throws(() => parseArgs(["--help", "extra"]), /unexpected argument: extra/);
+});
+
+test("parses wait --summarize and rejects it combined with --timeout-ms or --tail-chars", () => {
+  assert.deepEqual(parseArgs(["wait", "oc_1", "--summarize"]).options, {
+    taskId: "oc_1",
+    timeoutMs: undefined,
+    tailChars: undefined,
+    full: false,
+    summarize: true,
+  });
+  assert.throws(() => parseArgs(["wait", "oc_1", "--summarize", "--timeout-ms", "5000"]), /--summarize cannot be combined with --timeout-ms/);
+  assert.throws(() => parseArgs(["wait", "oc_1", "--summarize", "--tail-chars", "500"]), /--summarize cannot be combined with --tail-chars/);
 });
