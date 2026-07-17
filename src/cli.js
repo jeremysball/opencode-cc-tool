@@ -63,10 +63,11 @@ export async function runCli(argv = process.argv.slice(2), {
       writeToon(await runCommand(parsed.command, parsed.options, { io, cwd }), io);
       return { exitCode: 0 };
     }
+    const watchNeedsTaskIdResolution = parsed.command === "watch" && parsed.options.taskId && !parsed.options.directory;
     if (parsed.command === "home"
       || parsed.command === "dispatch"
       || parsed.command === "advisor"
-      || parsed.command === "watch"
+      || (parsed.command === "watch" && !watchNeedsTaskIdResolution)
       || parsed.command === "context"
       || (parsed.command === "list" && !parsed.options.all)) {
       parsed.options.directory = normalizeDirectory(parsed.options.directory || cwd);

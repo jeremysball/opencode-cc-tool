@@ -165,7 +165,11 @@ function streamTaskEvents({ client, io, signal, directory, taskId, summaries, fo
 }
 
 async function watchCommand(options, { client, io, signal, cwd }) {
-  const directory = normalizeDirectory(options.directory || cwd);
+  const directory = options.directory
+    ? normalizeDirectory(options.directory)
+    : options.taskId
+      ? normalizeDirectory((await client.request("task.status", { taskId: options.taskId })).directory)
+      : normalizeDirectory(cwd);
   return streamTaskEvents({
     client,
     io,

@@ -134,6 +134,7 @@ test("parses workspace, stream, and result options with their constrained values
     directory: "/tmp/project",
     format: "ndjson",
     summaries: true,
+    taskId: undefined,
   });
   assert.deepEqual(parseArgs(["list", "--all", "--limit", "10"]).options, {
     directory: undefined,
@@ -146,6 +147,16 @@ test("accepts --flag=value and rejects invalid enumerated values", () => {
   assert.equal(parseArgs(["dispatch", "--prompt=hello"]).options.prompt, "hello");
   assert.throws(() => parseArgs(["watch", "--format", "json"]), /must be one of toon, claude-monitor, ndjson/);
   assert.throws(() => parseArgs(["summary", "id", "--style", "brief"]), /must be one of report, activity/);
+});
+
+test("parses watch --task-id and rejects it for commands that don't take it", () => {
+  assert.deepEqual(parseArgs(["watch", "--task-id", "oc_1"], { cwd: "/workspace/project" }).options, {
+    directory: undefined,
+    format: "toon",
+    summaries: false,
+    taskId: "oc_1",
+  });
+  assert.throws(() => parseArgs(["status", "oc_1", "--task-id", "oc_2"]), /task id is required|unknown flag/);
 });
 
 test("rejects empty option values and trailing global arguments as usage errors", () => {

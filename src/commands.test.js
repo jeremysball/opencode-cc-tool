@@ -83,3 +83,35 @@ test("watch --task-id filters events to one task and exits on its terminal event
   assert.match(io.lines[1], /oc_1/);
   assert.match(io.lines[1], /done/);
 });
+
+test("watch --task-id resolves --directory from the task when omitted, and exits without abort", async () => {
+  const fromTask = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const elsewhere = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  let deliver;
+  const client = fakeClient({
+    onSubscribe: (params, onEvent) => {
+      deliver = onEvent;
+      assert.equal(params.directory, fromTask);
+    },
+  });
+  client.request = async (method, params) => {
+    assert.equal(method, "task.status");
+    assert.equal(params.taskId, "oc_9");
+    return { directory: fromTask };
+  };
+  const io = fakeIo();
+
+  const pending = runCommand("watch", { directory: undefined, format: "toon", summaries: false, taskId: "oc_9" }, {
+    client,
+    io,
+    cwd: elsewhere,
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+
+  deliver({ sequence: 1, type: "task.state", taskId: "oc_9", directory: fromTask, status: "crashed" });
+  const result = await pending;
+
+  assert.equal(result.event.status, "crashed");
+  assert.equal(client.closed.value, true);
+});

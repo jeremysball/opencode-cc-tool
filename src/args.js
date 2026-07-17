@@ -107,10 +107,11 @@ const commandSpecs = {
     description: "Stream task state events for a workspace.",
     options: {
       "--directory <path>": "workspace to watch, defaults to the current workspace",
+      "--task-id <id>": "scope the stream to one task; exits automatically once it settles",
       "--format toon|claude-monitor|ndjson": "stream format, default toon",
       "--summaries": "request activity summaries when available",
     },
-    examples: ['taskferry watch', 'taskferry watch --format claude-monitor', 'taskferry watch --format ndjson'],
+    examples: ['taskferry watch', 'taskferry watch --task-id <id> --summaries', 'taskferry watch --format ndjson'],
   },
   context: {
     usage: "taskferry context [options]",
@@ -253,7 +254,7 @@ function defaultOptions(command, cwd) {
     case "list":
       return { directory: cwd, all: false, limit: undefined };
     case "watch":
-      return { directory: cwd, format: "toon", summaries: false };
+      return { directory: undefined, format: "toon", summaries: false, taskId: undefined };
     case "context":
       return { directory: cwd, format: "toon" };
     case "doctor":
@@ -311,7 +312,9 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       "--max_words": "--max_words was renamed; use --max-words",
       "--session_id": "--session_id was renamed; use --session-id",
     };
-    if (migrationFlags[name]) throw new UsageError(`unknown flag ${name} for \`${command}\``, migrationFlags[name]);
+    if (migrationFlags[name] && !(name === "--task-id" && command === "watch")) {
+      throw new UsageError(`unknown flag ${name} for \`${command}\``, migrationFlags[name]);
+    }
 
     const booleanCommands = {
       "--full": ["wait", "status", "result", "doctor"],
@@ -343,6 +346,7 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       "--fields": "fields",
       "--limit": "limit",
       "--format": "format",
+      "--task-id": "taskId",
     };
     const key = values[name];
     if (!key || !commandAllows(command, name)) throw usageError(`unknown flag ${name} for \`${command}\``, command);
@@ -390,7 +394,7 @@ function commandAllows(command, flag) {
     summary: ["--style", "--max-words"],
     result: ["--fields"],
     list: ["--directory", "--limit"],
-    watch: ["--directory", "--format"],
+    watch: ["--directory", "--format", "--task-id"],
     context: ["--directory", "--format"],
     doctor: [],
   };
