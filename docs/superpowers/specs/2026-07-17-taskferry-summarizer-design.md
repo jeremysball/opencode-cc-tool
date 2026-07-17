@@ -25,46 +25,56 @@ final status block; it does not stream anything.
 
 ## Behavior
 
-### Protocol: task-scoped subscriptions
+### Task scoping: client-side, no protocol change
 
-`event.subscribe` gains an optional `taskId` parameter. The daemon's event
-dispatch (`src/daemon.js`, the `onEvent` loop around line 261) filters on it in
-addition to the existing `directory` check: a subscription with a `taskId` set
-only receives events for that task. When the filtered task reaches a terminal
-status (`done`, `crashed`, `cancelled`, `unknown`), the daemon closes that
-subscription itself after delivering the terminal event, instead of leaving it
-open until the client disconnects.
+Every emitted event already carries `taskId` (`src/events.js:31`), so no
+daemon or protocol change is needed to scope a stream to one task. The
+client subscribes exactly as `watch` does today (workspace-`directory`
+scoped) and the shared streaming helper filters locally: it ignores any
+event whose `taskId` doesn't match, and when a matching event's `status` is
+terminal (`done`, `crashed`, `cancelled`, `unknown`), it resolves its promise
+and closes the connection (`client.close()`) itself. The daemon's
+subscription bookkeeping (`src/daemon.js`'s `subscriptions` map) is
+unchanged — the existing socket-close cleanup path already removes it.
 
 ### Shared streaming helper
 
 The subscribe-and-print loop inline in `watchCommand` (`src/commands.js:132`)
 is extracted into a shared function (working name `streamTaskEvents`) taking
-`{ client, io, signal, directory, taskId?, summaries?, format }` and returning
-a promise that resolves once the stream closes — either on external interrupt
-(`signal` abort) or, when `taskId` is set, when the daemon closes the
-subscription after that task's terminal event. Both consumers below call this
-one function; neither reimplements subscribe/print/close logic separately.
+`{ client, io, signal, directory, taskId?, summaries?, format, onEvent? }` and
+returning a promise that resolves once the stream closes: on external
+interrupt (`signal` abort) always, and — when `taskId` is set — as soon as an
+event for that task carries a terminal `status` (`done`, `crashed`,
+`cancelled`, `unknown`), at which point it also calls `client.close()`. Both
+consumers below call this one function; neither reimplements
+subscribe/print/close logic separately. The optional `onEvent` callback lets
+a caller observe the terminating event itself (needed by `wait --summarize`,
+below) without re-parsing `formatWatchEvent`'s output.
 
 ### `watch --task-id <id>`
 
 New flag on the existing `watch` command. Resolves `--directory` from the
 task's known workspace when omitted (via `task.status`). Passes `taskId`
-through to `event.subscribe`. Behavior is otherwise identical to today's
-`watch --summaries`, except the command now exits on its own once the one
-task settles, rather than requiring interrupt.
+through to `streamTaskEvents` as a client-side filter (see above — no
+protocol change). Behavior is otherwise identical to today's `watch
+--summaries`, except the command now exits on its own once the one task
+settles, rather than requiring interrupt.
 
 ### `wait --summarize`
 
 New flag on `wait <id>`. Uses the task id `wait` already takes as its
-positional argument and needs no `--timeout-ms` — termination is driven by the
-task's real terminal event via the shared streaming subscription, not by a
-clamp. When set, `wait` skips the plain single-shot `task.wait` RPC call and
-instead calls `streamTaskEvents` with `summaries: true`, printing each
-periodic summary line to stdout as it arrives (same live behavior as `watch`).
-Once the task's terminal event lands, `wait --summarize` resolves with the
-exact same final status shape `wait` already returns today (`leanStatus`),
-so scripts and agents parsing `wait`'s output see no shape change — only
-human-facing interactive runs see the interim summary lines.
+positional argument and needs no `--timeout-ms` — termination is driven by
+the task's real terminal event via the shared streaming subscription, not by
+a clamp. When set, `wait` skips the plain single-shot `task.wait` RPC call
+and instead calls `streamTaskEvents` with `summaries: true`, printing each
+periodic summary line to stdout as it arrives (same live behavior as
+`watch`). The terminal event itself only carries `{taskId, directory,
+status, ...}`, not the full status shape `wait` returns today, so once
+`streamTaskEvents` resolves, `wait --summarize` makes one final
+`client.request("task.status", { taskId })` call and returns that through
+the same `leanStatus` projection plain `wait` already uses — so scripts and
+agents parsing `wait`'s output see no shape change, only human-facing
+interactive runs see the interim summary lines.
 
 `wait` without `--summarize` is unchanged: single blocking `task.wait` call,
 one final result, no streaming.
@@ -80,11 +90,10 @@ one final result, no streaming.
 
 ## Testing
 
-- Daemon: a subscription with `taskId` set receives only that task's events,
-  and closes itself once the task reaches a terminal status.
-- `streamTaskEvents`: resolves on external abort signal; resolves when the
-  task-scoped subscription closes; prints each event through the existing
-  `formatWatchEvent`.
+- `streamTaskEvents`: resolves on external abort signal; ignores events for
+  other task ids when `taskId` is set; resolves and closes the client on a
+  matching terminal-status event; prints each (matching) event through the
+  existing `formatWatchEvent`.
 - `watch --task-id`: directory auto-resolution from task id; exits without
   interrupt once the task settles.
 - `wait --summarize`: requires an existing task id (same validation as plain
