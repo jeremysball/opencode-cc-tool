@@ -1,4 +1,4 @@
-import { test, describe } from "node:test";
+import { test, describe, mock } from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import fs from "node:fs";
@@ -13,7 +13,7 @@ import { createTaskManager } from "./tasks.js";
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, watchdogPollMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, onEvent } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, onEvent } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -36,7 +36,9 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     ...(advisorSessionTtlMs != null ? { advisorSessionTtlMs } : {}),
     ...(maxConcurrentTasks != null ? { maxConcurrentTasks } : {}),
     ...(noOutputTimeoutMs != null ? { noOutputTimeoutMs } : {}),
+    ...(postOutputNoOutputTimeoutMs != null ? { postOutputNoOutputTimeoutMs } : {}),
     ...(watchdogPollMs != null ? { watchdogPollMs } : {}),
+    ...(maxWaitMs != null ? { maxWaitMs } : {}),
     ...(keySlotsSpec != null ? { keySlotsSpec } : {}),
     ...(providerKeyEnvName != null ? { providerKeyEnvName } : {}),
     ...(summaryKeySlot != null ? { summaryKeySlot } : {}),
@@ -504,6 +506,7 @@ describe("no-output watchdog", () => {
       spawnFn: () => child,
       killFn: (pid, signal) => killed.push({ pid, signal }),
       noOutputTimeoutMs: 20,
+      postOutputNoOutputTimeoutMs: 20,
       watchdogPollMs: 5,
     });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
@@ -511,6 +514,132 @@ describe("no-output watchdog", () => {
 
     await new Promise((r) => setTimeout(r, 70));
     assert.ok(killed.some((k) => k.signal === "SIGTERM"), "watchdog must eventually fire after the last activity, not just the start");
+
+    child.emit("exit", null, "SIGTERM");
+    assert.equal(mgr.status(dispatched.id).failureReason, "no_output_timeout");
+  });
+
+  test("one log event then silence: the task survives well past noOutputTimeoutMs because the budget escalated", async () => {
+    // The regression this whole change exists for: a task does real work,
+    // then goes quiet to compose one long final answer. opencode writes
+    // step-level events, not token deltas, so the log goes silent for
+    // minutes and the pre-output budget would SIGTERM the task mid-write.
+    //
+    // Pre-change this test FAILS: postOutputNoOutputTimeoutMs is ignored,
+    // the budget stays at 20 ms, and the SIGTERM lands ~25 ms in.
+    const child = fakeChild(7005);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 20,
+      postOutputNoOutputTimeoutMs: 10000,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const logPath = mgr.status(dispatched.id).logPath;
+
+    // One parseable line lands before the pre-output deadline, flipping the
+    // latch. Everything from here to the assert is silence.
+    fs.appendFileSync(logPath, JSON.stringify({ type: "text", part: { messageID: "m1", text: "working..." } }) + "\n");
+
+    await new Promise((r) => setTimeout(r, 60));
+    assert.deepEqual(killed, [], "after one parseable log event, the escalated budget must keep the task alive past noOutputTimeoutMs");
+    assert.equal(mgr.status(dispatched.id).status, "running");
+
+    child.emit("exit", 0, null);
+    assert.equal(mgr.status(dispatched.id).failureReason, null);
+  });
+
+  test("the escalated budget is still a deadline: silence past postOutputNoOutputTimeoutMs kills, and never before it", async () => {
+    // Escalation must not mean "no watchdog at all" -- a genuinely hung task
+    // that produced some output early still has to die, just on the longer
+    // budget. The timing assertion is what makes this test discriminating:
+    // pre-change the kill lands at the 20 ms pre-output budget, so asserting
+    // the kill happened no earlier than 40 ms fails. Post-change it lands at
+    // ~60 ms. Only a lower bound is asserted, since load can delay a timer
+    // but never fire it early.
+    const child = fakeChild(7006);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal, at: Date.now() }),
+      noOutputTimeoutMs: 20,
+      postOutputNoOutputTimeoutMs: 60,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const logPath = mgr.status(dispatched.id).logPath;
+
+    const seededAt = Date.now();
+    fs.appendFileSync(logPath, JSON.stringify({ type: "text", part: { messageID: "m1", text: "first event" } }) + "\n");
+
+    await new Promise((r) => setTimeout(r, 200));
+    const sigterm = killed.find((k) => k.signal === "SIGTERM");
+    assert.ok(sigterm, "the post-output watchdog must still fire on continued silence past postOutputNoOutputTimeoutMs");
+    assert.ok(
+      sigterm.at - seededAt >= 40,
+      `the kill must respect the escalated budget, not the 20 ms pre-output one (fired ${sigterm.at - seededAt} ms after the log event)`
+    );
+
+    child.emit("exit", null, "SIGTERM");
+    assert.equal(mgr.status(dispatched.id).failureReason, "no_output_timeout");
+  });
+
+  test("the watcher's first tick sees pre-existing JSON in the log: latch flips and post-output budget applies from the start", async () => {
+    // Edge case in the escalation latch itself: the very first tick (not a
+    // later one) is what observes the JSON line, so the latch must flip on
+    // the first tick rather than only on a tick that follows a previous
+    // empty tick. Pre-seeding the log file before the first tick fires is
+    // the cleanest way to force that path through the code.
+    //
+    // The test reproduces this without touching internal manager state:
+    // dispatch() opens the log file in append mode (fs.openSync(..., "a",
+    // 0o600) at src/tasks.js:977), which preserves pre-existing content
+    // instead of truncating it. The watcher's first tick then reads the
+    // pre-seeded JSON from offset 0, so the outputSeen flag flips and
+    // currentNoOutputTimeout jumps to postOutputNoOutputTimeout on the same
+    // tick that would otherwise have hit the noOutputTimeout deadline.
+    //
+    // All code between dispatch() returning and fs.writeFileSync() returning
+    // runs synchronously in the test thread, so the watcher's first interval
+    // tick (scheduled via setInterval for `watchdogPollMs` ms later) cannot
+    // fire before the seed is on disk.
+    //
+    // Note: this is not a "daemon-restart re-adoption" scenario in this
+    // codebase -- loadPersisted() relabels any task that was `running` at
+    // shutdown to `unknown` on restart, and startRunningWatcher() is only
+    // ever invoked from a fresh dispatch() call, never re-armed for a
+    // restored task. The edge case worth pinning down is purely the
+    // first-tick-sees-existing-content timing of the latch.
+    const child = fakeChild(7007);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 20,
+      postOutputNoOutputTimeoutMs: 60,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const logPath = mgr.status(dispatched.id).logPath;
+    fs.writeFileSync(logPath, JSON.stringify({ type: "text", part: { messageID: "m1", text: "from before" } }) + "\n");
+
+    // Wait past noOutputTimeoutMs (20 ms) plus a comfortable buffer. With
+    // the latch broken, the SIGTERM lands here because the budget stays at
+    // 20 ms even though the log already contains parseable JSON. With the
+    // latch working, the very first tick reads the pre-seeded JSON, the
+    // outputSeen flag flips, and the deadline jumps to 60 ms.
+    await new Promise((r) => setTimeout(r, 35));
+    assert.deepEqual(killed, [], "watchdog must NOT fire at noOutputTimeoutMs when the log already contains parseable JSON");
+
+    // Wait past postOutputNoOutputTimeoutMs (60 ms). The latch means the
+    // deadline stays escalated at 60 ms, so continued silence must trigger
+    // the SIGTERM at exactly the post-output budget, not at noOutputTimeoutMs
+    // (broken latch) and not at the 300 s default (broken escalation).
+    await new Promise((r) => setTimeout(r, 100));
+    const sigterm = killed.find((k) => k.signal === "SIGTERM");
+    assert.ok(sigterm, "after the latch from pre-existing JSON, the post-output watchdog must still fire on continued silence");
 
     child.emit("exit", null, "SIGTERM");
     assert.equal(mgr.status(dispatched.id).failureReason, "no_output_timeout");
@@ -872,6 +1001,55 @@ describe("poll()", () => {
     assert.equal(settled.outputTailTotalChars, output.length);
     assert.equal(settled.outputTailTruncated, true);
   });
+
+  test("with no options, resolves only once the task settles (no default 45s timer)", async () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    try {
+      mock.timers.enable({ apis: ["setTimeout"] });
+      const waitPromise = mgr.poll(dispatched.id);
+      let settledYet = false;
+      void waitPromise.then(() => { settledYet = true; });
+
+      // Advance beyond the old default instead of waiting a short real-time interval.
+      mock.timers.tick(45001);
+      await Promise.resolve();
+      assert.equal(settledYet, false, "poll() with no options must not resolve before the task settles");
+
+      child.emit("exit", 0, null);
+      const settled = await waitPromise;
+      assert.equal(settled.status, "done");
+    } finally {
+      mock.timers.reset();
+    }
+  });
+
+  test("with { timeoutMs: N }, still returns 'running' after Nms when the task hasn't settled (explicit override path)", async () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+
+    try {
+      mock.timers.enable({ apis: ["setTimeout"] });
+      const waitPromise = mgr.poll(dispatched.id, { timeoutMs: 50000 });
+      let settledYet = false;
+      void waitPromise.then(() => { settledYet = true; });
+
+      // The old implementation clamped this value to 45000ms.
+      mock.timers.tick(45001);
+      await Promise.resolve();
+      assert.equal(settledYet, false, "timeoutMs above the old cap must not settle at 45000ms");
+
+      mock.timers.tick(4999);
+      const settled = await waitPromise;
+      assert.equal(settled.status, "running");
+      assert.equal("outputTail" in settled, false);
+    } finally {
+      mock.timers.reset();
+    }
+  });
 });
 
 describe("advisor()", () => {
@@ -1082,6 +1260,26 @@ describe("advisor()", () => {
     const advised = await advisorPromise;
     assert.equal(advised.status, "crashed");
     assert.equal(advised.exitCode, 1);
+  });
+
+  test("with no timeout_ms, against an injected small maxWaitMs, still returns the bounded 'still running' + resumable session_id shape", async () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child, maxWaitMs: 30 });
+
+    const advisorPromise = mgr.advisor({
+      prompt: "long question",
+      directory: os.tmpdir(),
+      model: "openai/gpt-5.6-sol",
+    });
+    const row = mgr.list().tasks[0];
+    const dispatched = { id: row.id, logPath: path.join(mgr.paths.LOG_DIR, `${row.id}.ndjson`) };
+    fs.writeFileSync(dispatched.logPath, JSON.stringify({ sessionID: "ses_midrun" }));
+
+    const advised = await advisorPromise;
+    assert.equal(advised.status, "running");
+    assert.equal(advised.task_id, dispatched.id);
+    assert.equal(advised.session_id, "ses_midrun");
+    assert.match(advised.note, /taskferry_poll or taskferry_advisor again with session_id/);
   });
 });
 
