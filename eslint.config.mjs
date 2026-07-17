@@ -1,8 +1,9 @@
 import js from "@eslint/js";
 import globals from "globals";
 
-// Taskferry is a Node ESM project: an MCP server (src/server.js), its task
-// manager (src/tasks.js), node:test test files, and standalone smoke-test
+// Taskferry is a Node ESM project: the AXI CLI entrypoint (src/cli.js),
+// the daemon that owns task processes (src/daemon.js), its task manager
+// (src/tasks.js), node:test test files, and standalone smoke-test
 // scripts run directly with `node`. Everything runs under Node, so one
 // language-options block covers the whole tree.
 export default [
