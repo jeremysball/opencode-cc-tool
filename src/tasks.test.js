@@ -875,12 +875,12 @@ describe("poll()", () => {
   });
 
   test("with no options, resolves only once the task settles (no default 45s timer)", async () => {
-    mock.timers.enable({ apis: ["setTimeout"] });
     const child = fakeChild();
     const mgr = makeManager({ spawnFn: () => child });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
 
     try {
+      mock.timers.enable({ apis: ["setTimeout"] });
       const waitPromise = mgr.poll(dispatched.id);
       let settledYet = false;
       void waitPromise.then(() => { settledYet = true; });
@@ -899,12 +899,12 @@ describe("poll()", () => {
   });
 
   test("with { timeoutMs: N }, still returns 'running' after Nms when the task hasn't settled (explicit override path)", async () => {
-    mock.timers.enable({ apis: ["setTimeout"] });
     const child = fakeChild();
     const mgr = makeManager({ spawnFn: () => child });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
 
     try {
+      mock.timers.enable({ apis: ["setTimeout"] });
       const waitPromise = mgr.poll(dispatched.id, { timeoutMs: 50000 });
       let settledYet = false;
       void waitPromise.then(() => { settledYet = true; });
