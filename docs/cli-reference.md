@@ -146,10 +146,13 @@ daemon restarted while the task was still running; see
 
 Lean fields by default; pass `--full` for directory, model, session id, log
 path, and prompt preview. `failureReason` is `null` unless the task was
-stopped by the no-output watchdog (`"no_output_timeout"`) or
-provider-usage-exhaustion detection (`"provider_usage_exhausted"`).
-`keySlot` echoes the `--key-slot` name the task was dispatched with, or
-`null`.
+stopped by the no-output watchdog (`"no_output_timeout"`) or a
+provider-failure diagnostic (`"rate_limited"`, `"payment_required"`, or
+`"authentication_failed"`; see [daemon.md](daemon.md#watchdogs)).
+`failureDetail` (also `--full`-only, or via `result --fields
+failureDetail`) carries the matched log line or timeout detail behind
+whichever `failureReason` fired. `keySlot` echoes the `--key-slot` name the
+task was dispatched with, or `null`.
 
 ## `taskferry tail <id> [--chars <number>]`
 
@@ -188,7 +191,7 @@ instead of a partial result if called too early.
 | Flag | Notes |
 |---|---|
 | `--full` | Include untruncated narration; only valid when `narration` is in `--fields` |
-| `--fields <comma-list>` | Project only the fields you need: `message`, `narration`, `tokens`, `cost`, `sessionId`, `exitCode`, `signal`, `spawnError`, `failureReason`, `keySlot`, `logPath` |
+| `--fields <comma-list>` | Project only the fields you need: `message`, `narration`, `tokens`, `cost`, `sessionId`, `exitCode`, `signal`, `spawnError`, `failureReason`, `failureDetail`, `keySlot`, `logPath` |
 
 ```
 $ taskferry result oc_mrn4ipkp_19450105

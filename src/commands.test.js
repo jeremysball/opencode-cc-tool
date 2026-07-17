@@ -238,6 +238,69 @@ test("wait --summarize skips the trailing task.status RPC on abort and reports t
   assert.equal(statusCalls, callsBeforeAbort, "no additional task.status RPC should fire after abort");
 });
 
+test("status surfaces a resume hint when a crashed task has a salvageable sessionId", async () => {
+  const client = {
+    request: async (method, params) => {
+      assert.equal(method, "task.status");
+      assert.equal(params.taskId, "oc_7");
+      return {
+        id: "oc_7",
+        status: "crashed",
+        directory: "/workspace/project",
+        sessionId: "ses_abc123",
+        startedAt: "2026-07-17T00:00:00.000Z",
+        exitCode: 1,
+        signal: null,
+        failureReason: "rate_limited",
+      };
+    },
+  };
+  const result = await runCommand("status", { taskId: "oc_7", full: false }, { client });
+  assert.equal(
+    result.next,
+    'Session \'ses_abc123\' may be salvageable; resume with taskferry dispatch --session-id \'ses_abc123\' --directory \'/workspace/project\' --prompt "<continuation prompt>"'
+  );
+});
+
+test("status keeps the generic hint for a crashed task with no sessionId", async () => {
+  const client = {
+    request: async () => ({
+      id: "oc_8",
+      status: "crashed",
+      directory: "/workspace/project",
+      sessionId: null,
+      startedAt: "2026-07-17T00:00:00.000Z",
+      exitCode: 1,
+      signal: null,
+      failureReason: "authentication_failed",
+    }),
+  };
+  const result = await runCommand("status", { taskId: "oc_8", full: false }, { client });
+  assert.equal(
+    result.next,
+    'Run taskferry result with task id "oc_8" to see the final message; pass --full here for directory/model/log path details'
+  );
+});
+
+test("status keeps the running-task hint unaffected by the crashed-path change", async () => {
+  const client = {
+    request: async () => ({
+      id: "oc_9",
+      status: "running",
+      directory: "/workspace/project",
+      sessionId: "ses_should_be_ignored",
+      startedAt: "2026-07-17T00:00:00.000Z",
+      exitCode: null,
+      signal: null,
+    }),
+  };
+  const result = await runCommand("status", { taskId: "oc_9", full: false }, { client });
+  assert.equal(
+    result.next,
+    'Run taskferry wait or taskferry status with task id "oc_9" to check progress; pass --full for directory/model/log path details'
+  );
+});
+
 test("watch --task-id resolves immediately for an already-settled task instead of hanging", async () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
   const client = fakeClient({

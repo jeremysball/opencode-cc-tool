@@ -90,13 +90,24 @@ taskferry's non-interactive `opencode run --auto` invocation can't satisfy.
 Raise `TASKFERRY_NO_OUTPUT_TIMEOUT_MS` only if the task is legitimately
 slow to produce its first log line, not to paper over a hung `opencode`.
 
-## A task is stuck `crashed` with `failureReason: "provider_usage_exhausted"`
+## A task is stuck `crashed` with a provider-failure `failureReason`
 
-The watchdog matched a known rate-limit/quota/`429` diagnostic in the
-task's log and stopped it early rather than let it burn the remaining grace
-period against an exhausted key. Retry with a different `--model` or
-`--key-slot` (see [security.md](security.md#provider-key-slots)) rather
-than immediately retrying the same one.
+The watchdog matched a known provider-failure diagnostic in the task's log
+and stopped it early rather than let it burn the remaining grace period
+against a key that was never going to succeed. Which of the three values
+you see picks the fix; see [daemon.md](daemon.md#watchdogs) for exactly
+what triggers each one:
+
+- `"rate_limited"`: transient. Retry later, or switch `--key-slot`/`--model`
+  in the meantime (see [security.md](security.md#provider-key-slots)).
+- `"payment_required"`: the account behind that key slot needs a billing
+  fix. Switching `--key-slot` to a different account works around it; the
+  original slot needs attention regardless.
+- `"authentication_failed"`: the credential in that key slot is broken.
+  Rotate it, or switch `--key-slot` to a working one.
+
+`taskferry status <id> --full` (or `result --fields failureDetail`) shows
+the specific log line or error text that triggered the classification.
 
 ## `taskferry result` says the task is still running
 

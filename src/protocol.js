@@ -27,6 +27,7 @@ const RESULT_FIELDS = new Set([
   "signal",
   "spawnError",
   "failureReason",
+  "failureDetail",
   "keySlot",
   "logPath",
 ]);

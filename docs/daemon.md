@@ -111,11 +111,23 @@ CLI usage approaches.
   escalating to `SIGKILL`) and marked `crashed` with `failureReason:
   "no_output_timeout"`.
 - `TASKFERRY_WATCHDOG_POLL_MS` (default `2000`): how often the no-output and
-  provider-usage-exhaustion checks run against a running task's log.
-- A task stopped because its log matched a known provider-usage-exhaustion
-  diagnostic (rate limit, quota, `429`, ...) instead gets `failureReason:
-  "provider_usage_exhausted"` — distinct from a bare timeout so a caller
-  knows to pick another key slot or model rather than just retrying.
+  provider-failure checks run against a running task's log.
+- A task stopped because its log matched a known provider-failure
+  diagnostic gets one of three `failureReason` values instead of a bare
+  timeout, so a caller knows which corrective action fits:
+  - `"rate_limited"`: rate limit, usage limit, `429`, too many requests, or
+    a bare mention of `quota` with no billing-specific phrase nearby.
+    Transient: retry later, or switch key slot in the meantime.
+  - `"payment_required"`: `insufficient_quota`, `payment required`,
+    `billing`, or a `402` status. The account behind that key slot needs a
+    billing fix, not a retry.
+  - `"authentication_failed"`: `unauthorized`, an invalid API key, or a
+    `401` status. The credential in that key slot is broken and needs
+    rotating.
+  Each crash also carries `failureDetail`: the matched log line or
+  provider error text (capped at 500 characters), or for
+  `no_output_timeout`, which timeout value fired and whether it was before
+  or after the task's first output.
 
 ## Cancellation
 

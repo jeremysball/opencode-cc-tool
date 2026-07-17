@@ -123,6 +123,12 @@ test("parses workspace, stream, and result options with their constrained values
     full: true,
     fields: ["message", "narration"],
   });
+  assert.ok(parseArgs([
+    "result",
+    "oc_1",
+    "--fields",
+    "failureDetail",
+  ]).options.fields.includes("failureDetail"));
   assert.deepEqual(parseArgs([
     "watch",
     "--directory",

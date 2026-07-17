@@ -8,6 +8,7 @@ const RESULT_FIELDS = new Set([
   "signal",
   "spawnError",
   "failureReason",
+  "failureDetail",
   "keySlot",
   "logPath",
 ]);
@@ -228,7 +229,7 @@ function parseFields(value) {
   if (!fields.length || fields.some((field) => !RESULT_FIELDS.has(field))) {
     throw new UsageError(
       "--fields must contain one or more supported result fields",
-      "Use message, narration, tokens, cost, sessionId, exitCode, signal, spawnError, failureReason, keySlot, or logPath"
+      `Use one of: ${[...RESULT_FIELDS].join(", ")}`
     );
   }
   return fields;
