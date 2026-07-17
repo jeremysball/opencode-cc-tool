@@ -1,0 +1,52 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { runCommand } from "./commands.js";
+
+function fakeIo() {
+  const stdout = [];
+  return { stdout: { write: (chunk) => stdout.push(chunk) }, lines: stdout };
+}
+
+function fakeClient({ onSubscribe } = {}) {
+  const closed = { value: false };
+  return {
+    closed,
+    async request() {
+      throw new Error("request() not stubbed for this test");
+    },
+    async subscribe(params, onEvent) {
+      if (onSubscribe) onSubscribe(params, onEvent);
+      return "sub-1";
+    },
+    close() {
+      closed.value = true;
+    },
+  };
+}
+
+test("watch prints each event through formatWatchEvent and resolves on abort", async () => {
+  const controller = new AbortController();
+  let deliver;
+  const client = fakeClient({
+    onSubscribe: (_params, onEvent) => {
+      deliver = onEvent;
+    },
+  });
+  const io = fakeIo();
+
+  const pending = runCommand("watch", { directory: "/workspace/project", format: "toon", summaries: false }, {
+    client,
+    io,
+    signal: controller.signal,
+    cwd: "/workspace/project",
+  });
+
+  deliver({ sequence: 1, type: "task.state", taskId: "oc_1", directory: "/workspace/project", status: "running" });
+  controller.abort();
+  const result = await pending;
+
+  assert.equal(result.directory, "/workspace/project");
+  assert.equal(result.watching, false);
+  assert.equal(io.lines.length, 1);
+  assert.match(io.lines[0], /oc_1/);
+});

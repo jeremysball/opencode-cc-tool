@@ -129,23 +129,25 @@ export async function runCommand(command, options, { client, io = process, signa
   }
 }
 
-async function watchCommand(options, { client, io, signal, cwd }) {
-  const directory = normalizeDirectory(options.directory || cwd);
-  let stop;
+function streamTaskEvents({ client, io, signal, directory, taskId, summaries, format }) {
+  let settle;
+  let abortHandler;
   const finished = new Promise((resolve, reject) => {
     let settled = false;
-    stop = () => {
+    settle = (result) => {
       if (settled) return;
       settled = true;
-      resolve({ directory, watching: false });
+      resolve(result ?? { directory, watching: false });
     };
+    abortHandler = () => settle();
     if (signal?.aborted) {
-      stop();
+      settle();
       return;
     }
-    signal?.addEventListener("abort", stop, { once: true });
-    Promise.resolve(client.subscribe({ directory, ...(options.summaries ? { summaries: true } : {}) }, (event) => {
-      io.stdout.write(`${formatWatchEvent(event, options.format)}\n`);
+    signal?.addEventListener("abort", abortHandler, { once: true });
+    Promise.resolve(client.subscribe({ directory, ...(summaries ? { summaries: true } : {}) }, (event) => {
+      if (taskId && event.taskId !== taskId) return;
+      io.stdout.write(`${formatWatchEvent(event, format)}\n`);
     })).catch((error) => {
       if (settled) return;
       settled = true;
@@ -153,7 +155,20 @@ async function watchCommand(options, { client, io, signal, cwd }) {
     });
   });
   return finished.finally(() => {
-    signal?.removeEventListener("abort", stop);
+    signal?.removeEventListener("abort", abortHandler);
+  });
+}
+
+async function watchCommand(options, { client, io, signal, cwd }) {
+  const directory = normalizeDirectory(options.directory || cwd);
+  return streamTaskEvents({
+    client,
+    io,
+    signal,
+    directory,
+    summaries: options.summaries,
+    format: options.format,
+  }).finally(() => {
     if (client.close) client.close();
   });
 }
