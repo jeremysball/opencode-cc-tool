@@ -135,7 +135,7 @@ const SUMMARY_INPUT_BYTES = 96 * 1024;
 const SUMMARY_MODEL = process.env.TASKFERRY_SUMMARY_MODEL || "opencode-go/deepseek-v4-flash";
 const SUMMARY_AGENT = "taskferry-summary";
 const SUMMARY_PREFLIGHT_TIMEOUT_MS = 10000;
-const RESULT_FIELDS = new Set(["message", "narration", "tokens", "cost", "sessionId", "exitCode", "signal", "spawnError", "failureReason", "keySlot", "logPath"]);
+const RESULT_FIELDS = new Set(["message", "narration", "tokens", "cost", "sessionId", "exitCode", "signal", "spawnError", "failureReason", "failureDetail", "keySlot", "logPath"]);
 const execFileAsync = promisify(execFile);
 
 // Ordered most-specific-first: real provider error text often combines
@@ -626,12 +626,17 @@ export function createTaskManager({
    * @param {Task} task
    * @returns {TaskSummary}
    */
+  /** @param {Task} task */
+  function failureFields(task) {
+    return { failureReason: task.failureReason ?? null, failureDetail: task.failureDetail ?? null };
+  }
+
+  /** @param {Task} task */
   function summarize(task) {
-    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, failureReason, failureDetail, keySlot } = task;
+    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, keySlot } = task;
     return {
       id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath,
-      failureReason: failureReason ?? null,
-      failureDetail: failureDetail ?? null,
+      ...failureFields(task),
       keySlot: keySlot ?? null,
       promptPreview,
       ...(promptTotalChars != null ? { promptTotalChars } : {}),
@@ -1667,7 +1672,7 @@ export function createTaskManager({
     if (!task) throw noSuchTask(taskId);
     if (fields != null) {
       if (!Array.isArray(fields) || !fields.length || fields.some((field) => !RESULT_FIELDS.has(field))) {
-        throw new Error("error: fields must contain one or more supported result fields\nhelp: use message, narration, tokens, cost, sessionId, exitCode, signal, spawnError, failureReason, keySlot, or logPath");
+        throw new Error(`error: fields must contain one or more supported result fields\nhelp: use one of: ${[...RESULT_FIELDS].join(", ")}`);
       }
       if (full && !fields.includes("narration")) {
         throw new Error("error: full requires narration in fields\nhelp: omit full or include narration in fields");
@@ -1750,7 +1755,7 @@ export function createTaskManager({
       exitCode: task.exitCode,
       signal: task.signal,
       spawnError: task.spawnError,
-      failureReason: task.failureReason ?? null,
+      ...failureFields(task),
       keySlot: task.keySlot ?? null,
       sessionId,
       tokens,
