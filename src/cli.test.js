@@ -309,6 +309,25 @@ test("runs setup without connecting to the daemon", async () => {
   assert.equal(capture.output().value.path, "available");
 });
 
+test("surfaces setup failures on stderr and never connects to the daemon", async () => {
+  const capture = capturedIo();
+  let called = false;
+  const result = await runCli(["setup"], {
+    io: capture.io,
+    setup: () => {
+      called = true;
+      throw new Error("boom");
+    },
+    connectClient: async () => { throw new Error("setup must not connect"); },
+  });
+
+  assert.equal(called, true);
+  assert.equal(result.exitCode, 1);
+  assert.equal(capture.output().stdout, "");
+  assert.match(capture.output().stderr, /error: boom\n/);
+  assert.match(capture.output().stderr, /help: fix the reported dependency or filesystem problem, then rerun node src\/cli\.js setup\n/);
+});
+
 test("executes main() when invoked through a symlink to src/cli.js", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-cli-symlink-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
