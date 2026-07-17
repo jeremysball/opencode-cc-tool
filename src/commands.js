@@ -149,11 +149,10 @@ function streamTaskEvents({ client, io, signal, directory, taskId, summaries, fo
     signal?.addEventListener("abort", abortHandler, { once: true });
     Promise.resolve(client.subscribe({ directory, ...(summaries ? { summaries: true } : {}) }, (event) => {
       if (taskId && event.taskId !== taskId) return;
+      io.stdout.write(`${formatWatchEvent(event, format)}\n`);
       if (taskId && TERMINAL_STATUSES.has(event.status)) {
         settle({ directory, watching: false, event });
-        return;
       }
-      io.stdout.write(`${formatWatchEvent(event, format)}\n`);
     })).catch((error) => {
       if (settled) return;
       settled = true;

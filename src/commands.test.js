@@ -77,7 +77,9 @@ test("watch --task-id filters events to one task and exits on its terminal event
 
   const result = await pending;
   assert.equal(result.watching, false);
-  assert.equal(io.lines.length, 1, "only the matching task's events should print");
+  assert.equal(io.lines.length, 2, "only the matching task's events should print");
   assert.match(io.lines[0], /oc_1/);
   assert.match(io.lines[0], /running/);
+  assert.match(io.lines[1], /oc_1/);
+  assert.match(io.lines[1], /done/);
 });
