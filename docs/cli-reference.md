@@ -70,19 +70,20 @@ finish, are cancelled, fail to spawn, or hit the no-output watchdog. See
 
 ## `taskferry wait <id> [options]`
 
-Blocks until the task's real `exit` event fires, or `--timeout-ms` elapses
-(capped at 45000ms internally regardless of what's passed), then returns the
-same status shape as `taskferry status`.
+Blocks until the task's real `exit` event fires. With no `--timeout-ms`,
+this call has no cap and returns only once the task settles. Pass
+`--timeout-ms` to opt into an early return before that; the call then
+returns after that many milliseconds even if the task is still running.
 
 | Flag | Notes |
 |---|---|
-| `--timeout-ms <number>` | Maximum wait in milliseconds |
+| `--timeout-ms <number>` | Optional early-return cap in milliseconds; omit to block until settlement |
 | `--tail-chars <number>` | Include this many trailing narration characters if the task is still running when the timeout elapses |
 | `--full` | Include directory, model, session id, log path, and prompt preview |
 
-If it returns `status: "queued"` or `"running"`, the task simply outlived
-the cap; call `wait` again. This command was named `poll` before the AXI
-CLI; `taskferry poll` now fails with a rename notice.
+If it returns `status: "queued"` or `"running"`, an explicit `--timeout-ms`
+elapsed before the task settled; call `wait` again. This command was named
+`poll` before the AXI CLI; `taskferry poll` now fails with a rename notice.
 
 ```
 $ taskferry wait oc_mrn4ipkp_19450105 --timeout-ms 30000
@@ -109,7 +110,7 @@ planning or hard-debugging help mid-task, not for open-ended background work
 | `--directory <path>` | Defaults to the current workspace |
 | `--variant <name>` | Optional reasoning-effort override |
 | `--session-id <id>` | Resume a prior advisor exchange |
-| `--timeout-ms <number>` | Maximum wait in milliseconds, capped at 45000ms like `wait` |
+| `--timeout-ms <number>` | Optional early-return cap in milliseconds, same semantics as `wait` — omit to block until the advisor answers |
 
 If it times out before the advisor answers, the response is `status:
 "running"` plus `id` and `sessionId`; call `wait` or `advisor` again (with

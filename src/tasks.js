@@ -1313,11 +1313,10 @@ export function createTaskManager({
    * @param {{timeoutMs?: number, tailChars?: number}} [options]
    * @returns {Promise<TaskStatus>}
    */
-  function poll(taskId, { timeoutMs = MAX_WAIT_MS, tailChars } = {}) {
+  function poll(taskId, { timeoutMs, tailChars } = {}) {
     ensureStateLoaded();
     const task = tasks.get(taskId);
     if (!task) throw noSuchTask(taskId);
-    const cappedMs = Math.min(timeoutMs, MAX_WAIT_MS);
     if (task.status !== "running" && task.status !== "queued") {
       return Promise.resolve(summarize(task));
     }
@@ -1328,7 +1327,7 @@ export function createTaskManager({
           const idx = list.indexOf(settle);
           if (idx !== -1) list.splice(idx, 1);
         }
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         const current = /** @type {Task} */ (tasks.get(taskId));
         const summary = summarize(current);
         if (!timedOut || current.status !== "running" || tailChars == null) {
@@ -1343,7 +1342,7 @@ export function createTaskManager({
           outputTailTruncated: output.length > tailChars,
         });
       };
-      const timer = setTimeout(() => settle(true), cappedMs);
+      const timer = timeoutMs === undefined ? null : setTimeout(() => settle(true), timeoutMs);
       if (!waiters.has(taskId)) waiters.set(taskId, []);
       /** @type {Array<(timedOut?: boolean) => void>} */ (waiters.get(taskId)).push(settle);
     });
