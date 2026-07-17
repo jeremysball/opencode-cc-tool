@@ -1175,6 +1175,19 @@ export function createTaskManager({
     // line from the previous read until it's completed by the next chunk.
     let bytesRead = 0;
     let carry = "";
+    // Two-phase no-output budget:
+    //   - Before the task has produced any parseable log event, the watcher
+    //     compares against `noOutputTimeout`. A task that is silent from the
+    //     start is most likely genuinely wedged (bad spawn, auth failure,
+    //     provider hang) and should die fast.
+    //   - The moment the watcher sees its first parseable JSON line in the
+    //     log, the latch flips and the deadline jumps to
+    //     `postOutputNoOutputTimeout` for the rest of the task's life.
+    //     Silence after real work is far more likely a long generation
+    //     (opencode writes step-level events, not token deltas, so a long
+    //     final answer can produce zero log lines for minutes) than a hang.
+    let outputSeen = false;
+    let currentNoOutputTimeout = noOutputTimeout;
     const timer = setInterval(() => {
       const current = tasks.get(task.id);
       if (!current || current.status !== "running") {
@@ -1214,13 +1227,22 @@ export function createTaskManager({
             }
           })) {
             lastActivityMs = Date.now();
+            // Latch the budget escalation: once any parseable JSON line has
+            // landed for this task, every subsequent tick compares against
+            // `postOutputNoOutputTimeout` regardless of how much later silence
+            // follows. This is the only assignment to either flag/variable
+            // outside their initializers, so the latch is unconditional.
+            if (!outputSeen) {
+              outputSeen = true;
+              currentNoOutputTimeout = postOutputNoOutputTimeout;
+            }
           }
           void scheduleActivity(current);
         }
       } catch {
         // A rotated or removed log is retried on the next watcher tick.
       }
-      if (Date.now() - lastActivityMs >= noOutputTimeout) {
+      if (Date.now() - lastActivityMs >= currentNoOutputTimeout) {
         failRunningTask(current, "no_output_timeout");
       }
     }, watchdogPoll);
