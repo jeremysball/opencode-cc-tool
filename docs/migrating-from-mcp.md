@@ -83,9 +83,6 @@ CLI and isn't covered here; consult your history for the
 
 ## What has no equivalent
 
-- **`taskferry setup`** doesn't exist and never will in this architecture —
-  install the native integration for your agent instead of running a setup
-  command.
 - **Server-side `-e` environment flags** (`claude mcp add -e ...`) have no
   equivalent; set `TASKFERRY_*` variables in the environment the daemon
   auto-starts from instead (see [daemon.md](daemon.md#auto-start)).

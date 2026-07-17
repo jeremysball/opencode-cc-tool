@@ -73,9 +73,30 @@ test("rejects unknown flags and extra positional arguments before daemon access"
     return true;
   });
   assert.throws(() => parseArgs(["status", "one", "two"]), /unexpected argument: two/);
-  assert.throws(() => parseArgs(["setup"]), /setup is not available/);
+  assert.deepEqual(parseArgs(["setup"]), {
+    command: "setup",
+    options: {},
+    help: false,
+  });
   assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--full"]), /unknown flag --full/);
   assert.throws(() => parseArgs(["list", "--wait"]), /unknown flag --wait/);
+});
+
+test("parses the setup command with no arguments and rejects extras and flags", () => {
+  assert.deepEqual(parseArgs(["setup"]), {
+    command: "setup",
+    options: {},
+    help: false,
+  });
+
+  const helpParsed = parseArgs(["setup", "--help"]);
+  assert.equal(helpParsed.command, "setup");
+  assert.deepEqual(helpParsed.options, {});
+  assert.equal(helpParsed.help, true);
+  assert.match(helpParsed.helpText.usage, /taskferry setup/);
+
+  assert.throws(() => parseArgs(["setup", "extra"]), /unexpected argument/);
+  assert.throws(() => parseArgs(["setup", "--bogus"]), /unknown flag --bogus/);
 });
 
 test("rejects retired MCP names with one-step migration hints", () => {
