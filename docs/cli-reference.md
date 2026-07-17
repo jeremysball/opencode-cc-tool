@@ -191,7 +191,7 @@ instead of a partial result if called too early.
 | Flag | Notes |
 |---|---|
 | `--full` | Include untruncated narration; only valid when `narration` is in `--fields` |
-| `--fields <comma-list>` | Project only the fields you need: `message`, `narration`, `tokens`, `cost`, `sessionId`, `exitCode`, `signal`, `spawnError`, `failureReason`, `keySlot`, `logPath` |
+| `--fields <comma-list>` | Project only the fields you need: `message`, `narration`, `tokens`, `cost`, `sessionId`, `exitCode`, `signal`, `spawnError`, `failureReason`, `failureDetail`, `keySlot`, `logPath` |
 
 ```
 $ taskferry result oc_mrn4ipkp_19450105

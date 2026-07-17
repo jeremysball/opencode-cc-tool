@@ -187,7 +187,7 @@ const FAILURE_DETAIL_MAX_CHARS = 500;
 
 /** @param {string} text */
 function capDetail(text) {
-  return text.length > FAILURE_DETAIL_MAX_CHARS ? text.slice(0, FAILURE_DETAIL_MAX_CHARS) + "…" : text;
+  return text.length > FAILURE_DETAIL_MAX_CHARS ? text.slice(0, FAILURE_DETAIL_MAX_CHARS - 1) + "…" : text;
 }
 
 // Scoped to opencode's own structured `type:"error"` events and raw
@@ -649,7 +649,8 @@ export function createTaskManager({
   // detail (directory, pid, logPath, ...) that summarize() carries for a
   // single-task lookup. failureReason is included despite that otherwise-thin
   // schema because a "crashed" status alone doesn't tell a scanning agent
-  // whether the task is worth retrying immediately (provider_usage_exhausted)
+  // whether the task is worth retrying immediately (a provider failure bucket
+  // such as rate_limited, payment_required, or authentication_failed)
   // or not (any other crash) -- omitting it here forces a task.status
   // round-trip per crashed row just to learn that.
   /**
@@ -1173,7 +1174,8 @@ export function createTaskManager({
 
     task.cancelRequested = true;
     // Don't clobber a failureReason the watchdog already set (e.g. it fired
-    // provider_usage_exhausted just before this cancel() call arrived) --
+    // a provider failure bucket such as rate_limited just before this
+    // cancel() call arrived) --
     // failureReason starts null at task creation, so leaving it alone here
     // preserves that diagnostic instead of erasing it under "cancelled".
     stopRunningWatcher(taskId);

@@ -715,6 +715,27 @@ describe("provider-failure classification", () => {
     assert.equal(s.failureDetail, "rate limit exceeded");
   });
 
+  test("a matched log line longer than 500 chars is truncated to exactly the 500-char cap", async () => {
+    const child = fakeChild(7199);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 60000,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const longLine = "rate limit exceeded " + "x".repeat(1000);
+    fs.writeFileSync(mgr.status(dispatched.id).logPath, longLine);
+
+    await new Promise((r) => setTimeout(r, 40));
+    child.emit("exit", null, "SIGTERM");
+    const s = mgr.status(dispatched.id, { full: true });
+    assert.equal(s.failureReason, "rate_limited");
+    assert.equal(s.failureDetail.length, 500);
+    assert.ok(s.failureDetail.endsWith("…"));
+  });
+
   test("status still lands on crashed when the SIGTERM'd child exits 0 (traps the signal) instead of dying by signal", async () => {
     const child = fakeChild(7105);
     const killed = [];
