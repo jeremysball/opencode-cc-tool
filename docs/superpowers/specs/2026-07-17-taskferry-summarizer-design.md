@@ -41,15 +41,16 @@ unchanged — the existing socket-close cleanup path already removes it.
 
 The subscribe-and-print loop inline in `watchCommand` (`src/commands.js:132`)
 is extracted into a shared function (working name `streamTaskEvents`) taking
-`{ client, io, signal, directory, taskId?, summaries?, format, onEvent? }` and
+`{ client, io, signal, directory, taskId?, summaries?, format }` and
 returning a promise that resolves once the stream closes: on external
 interrupt (`signal` abort) always, and — when `taskId` is set — as soon as an
 event for that task carries a terminal `status` (`done`, `crashed`,
-`cancelled`, `unknown`), at which point it also calls `client.close()`. Both
-consumers below call this one function; neither reimplements
-subscribe/print/close logic separately. The optional `onEvent` callback lets
-a caller observe the terminating event itself (needed by `wait --summarize`,
-below) without re-parsing `formatWatchEvent`'s output.
+`cancelled`, `unknown`). It does not close the client connection itself;
+that stays the caller's decision, since `wait --summarize` needs the
+connection to stay open for one more RPC call after the stream ends (see
+below), while `watch` closes it immediately since it has nothing further to
+do. Both consumers below call this one function; neither reimplements
+subscribe/print/close logic separately.
 
 ### `watch --task-id <id>`
 
