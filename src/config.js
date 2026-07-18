@@ -59,7 +59,7 @@ export function loadConfig({ env = process.env, configPath = resolveConfigPath(e
   }
 
   for (const key of Object.keys(parsed)) {
-    if (!(key in CONFIG_FIELD_TYPES)) {
+    if (!Object.hasOwn(CONFIG_FIELD_TYPES, key)) {
       throw new Error(`error: unrecognized config key "${key}" in ${configPath}\nhelp: recognized keys are: ${Object.keys(CONFIG_FIELD_TYPES).join(", ")}`);
     }
     const expectedType = CONFIG_FIELD_TYPES[key];

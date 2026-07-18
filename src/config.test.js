@@ -77,4 +77,10 @@ describe("loadConfig()", () => {
     const configPath = writeConfig(dir, JSON.stringify({ keySlots: "primary:OPENCODE_GO_API_KEY" }));
     assert.deepEqual(loadConfig({ configPath }), { keySlots: "primary:OPENCODE_GO_API_KEY" });
   });
+
+  test("rejects __proto__ as an unrecognized key (prototype-pollution guard)", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, '{"__proto__": null}');
+    assert.throws(() => loadConfig({ configPath }), /error: unrecognized config key "__proto__".*\nhelp:/s);
+  });
 });
