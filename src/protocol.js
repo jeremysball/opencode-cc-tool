@@ -30,6 +30,8 @@ const RESULT_FIELDS = new Set([
   "failureDetail",
   "keySlot",
   "logPath",
+  "incomplete",
+  "finalMarker",
 ]);
 const MANAGER_METHODS = Object.freeze({
   "task.dispatch": "dispatch",
@@ -86,13 +88,14 @@ function validParams(method, params) {
     case "system.health":
       return hasOnly(params, []);
     case "task.dispatch":
-      return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "keySlot"])
+      return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "keySlot", "finalMarker"])
         && isNonEmptyString(params.prompt)
         && isAbsolutePath(params.directory)
         && optional(params.model, isNonEmptyString)
         && optional(params.variant, isNonEmptyString)
         && optional(params.sessionId, isNonEmptyString)
-        && optional(params.keySlot, isNonEmptyString);
+        && optional(params.keySlot, isNonEmptyString)
+        && optional(params.finalMarker, isNonEmptyString);
     case "task.cancel":
       return hasOnly(params, ["taskId", "graceMs"])
         && isNonEmptyString(params.taskId)

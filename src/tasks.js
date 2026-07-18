@@ -41,6 +41,8 @@ import { withFileLock } from "./state-lock.js";
  * @property {string|null} [failureDetail]
  * @property {string|null} [keySlot]
  * @property {SummaryOf} [summaryOf]
+ * @property {boolean} [incomplete]
+ * @property {string|null} [finalMarker]
  */
 
 /**
@@ -63,6 +65,8 @@ import { withFileLock } from "./state-lock.js";
  * @property {string|null} [failureReason]
  * @property {string|null} [failureDetail]
  * @property {string|null} [keySlot]
+ * @property {boolean} [incomplete]
+ * @property {string|null} [finalMarker]
  */
 
 /**
@@ -119,6 +123,8 @@ import { withFileLock } from "./state-lock.js";
  * @property {string} [logPath]
  * @property {SummaryOf} [summaryOf]
  * @property {string} [next]
+ * @property {boolean} [incomplete]
+ * @property {string|null} [finalMarker]
  */
 
 const DEFAULT_STATE_DIR =
@@ -135,7 +141,7 @@ const SUMMARY_INPUT_BYTES = 96 * 1024;
 const SUMMARY_MODEL = process.env.TASKFERRY_SUMMARY_MODEL || "opencode/hy3-free";
 const SUMMARY_AGENT = "taskferry-summary";
 const SUMMARY_PREFLIGHT_TIMEOUT_MS = 10000;
-const RESULT_FIELDS = new Set(["message", "narration", "tokens", "cost", "sessionId", "exitCode", "signal", "spawnError", "failureReason", "failureDetail", "keySlot", "logPath"]);
+const RESULT_FIELDS = new Set(["message", "narration", "tokens", "cost", "sessionId", "exitCode", "signal", "spawnError", "failureReason", "failureDetail", "keySlot", "logPath", "incomplete", "finalMarker"]);
 const execFileAsync = promisify(execFile);
 
 /**
@@ -677,7 +683,7 @@ export function createTaskManager({
    * @returns {TaskSummary}
    */
   function summarize(task) {
-    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, keySlot } = task;
+    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, keySlot, incomplete, finalMarker } = task;
     return {
       id, status, directory, model, sessionId, pid, startedAt, endedAt, exitCode, signal, logPath,
       ...failureFields(task),
@@ -685,6 +691,8 @@ export function createTaskManager({
       promptPreview,
       ...(promptTotalChars != null ? { promptTotalChars } : {}),
       ...(task.summaryOf ? { summaryOf: task.summaryOf } : {}),
+      ...(incomplete === true ? { incomplete: true } : {}),
+      ...(finalMarker != null ? { finalMarker } : {}),
       cancelRequested: !!cancelRequested,
     };
   }
@@ -762,9 +770,10 @@ export function createTaskManager({
    * @param {string|undefined} [params.sessionId]
    * @param {string|null} [params.keySlot]
    * @param {boolean} [params.internal]
+   * @param {string|null} [params.finalMarker]
    * @returns {TaskSummary & {next: string}}
    */
-  function dispatch({ prompt, directory, model, variant, sessionId, keySlot, internal = false }) {
+  function dispatch({ prompt, directory, model, variant, sessionId, keySlot, internal = false, finalMarker = null }) {
     ensureStateLoaded();
     if (!prompt || typeof prompt !== "string") {
       throw new Error("error: prompt is required\nhelp: taskferry_dispatch requires a non-empty prompt string");
@@ -774,6 +783,16 @@ export function createTaskManager({
     }
     if (!fs.existsSync(directory) || !fs.statSync(directory).isDirectory()) {
       throw new Error(`error: directory does not exist: ${directory}\nhelp: check the path or create the directory first`);
+    }
+    if (finalMarker != null) {
+      if (typeof finalMarker !== "string") {
+        throw new Error("error: finalMarker must be a string regex source\nhelp: pass --require-final-marker with a pattern that compiles as a standard JS RegExp");
+      }
+      try {
+        new RegExp(finalMarker);
+      } catch (err) {
+        throw new Error(`error: --require-final-marker is not a valid RegExp (${errMessage(err)})\nhelp: use standard JS RegExp syntax, e.g. '^Status: (DONE|DONE_WITH_CONCERNS|BLOCKED)$'`, { cause: err });
+      }
     }
     const normalizedDirectory = fs.realpathSync(directory);
 
@@ -807,6 +826,8 @@ export function createTaskManager({
       failureReason: null,
       failureDetail: null,
       keySlot: resolvedKeySlot.keySlot,
+      incomplete: false,
+      finalMarker: finalMarker == null ? null : finalMarker,
     };
     tasks.set(id, task);
     persistTask(task.id);
@@ -1161,6 +1182,7 @@ export function createTaskManager({
         task.endedAt = new Date().toISOString();
         const parsedSessionId = readSessionIdFromLog(task.logPath);
         if (parsedSessionId) task.sessionId = parsedSessionId;
+        if (task.status === "done") evaluateOutputCompleteness(task);
         finishSettlement();
       });
 
@@ -1723,6 +1745,83 @@ export function createTaskManager({
     return projected;
   }
 
+  // Settlement-time check for "done but no real output": an otherwise clean
+  // exit whose extracted final message is empty (after trimming) is flagged
+  // with task.incomplete = true, and a task dispatched with --require-final-marker
+  // is also flagged when the final message doesn't match the persisted pattern.
+  // Runs only on "done" status: cancelled/crashed already carry failureReason,
+  // and overloading them with a second failure axis muddies the existing
+  // "is this an error or not?" branching in callers.
+  /**
+   * @param {Task} task
+   */
+  function evaluateOutputCompleteness(task) {
+    const message = extractFinalMessage(task.logPath);
+    if (!message.trim()) {
+      task.incomplete = true;
+      return;
+    }
+    if (task.finalMarker) {
+      try {
+        if (!new RegExp(task.finalMarker).test(message)) task.incomplete = true;
+      } catch {
+        // A finalMarker that survived dispatch-time validation shouldn't
+        // throw here, but if it does (e.g. an impossible pathological input),
+        // fail closed: treat the task as incomplete rather than silently
+        // reporting success.
+        task.incomplete = true;
+      }
+    }
+  }
+
+  /**
+   * @param {string} logPath
+   * @returns {string}
+   */
+  function extractFinalMessage(logPath) {
+    let raw;
+    try {
+      raw = fs.readFileSync(logPath, "utf8");
+    } catch {
+      return "";
+    }
+    /** @type {Map<string, string[]>} */
+    const textByMessageId = new Map();
+    /** @type {string[]} */
+    const textOrder = [];
+    /** @type {string|null} */
+    let finalMessageId = null;
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      /** @type {any} */
+      let evt;
+      try {
+        evt = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (evt.type === "text" && evt.part && typeof evt.part.text === "string") {
+        const mid = evt.part.messageID;
+        if (!textByMessageId.has(mid)) {
+          textByMessageId.set(mid, []);
+          textOrder.push(mid);
+        }
+        /** @type {string[]} */ (textByMessageId.get(mid)).push(evt.part.text);
+      }
+      if (evt.type === "step_finish" && evt.part && evt.part.reason === "stop") {
+        finalMessageId = evt.part.messageID;
+      }
+    }
+    // Same fallback rule as result(): the last messageID seen wins if no
+    // explicit step_finish reason "stop" landed (e.g. a crashed run that never
+    // reached one). The settlement-time check uses this same fallback so a
+    // clean exit with no step_finish still gets its final turn inspected.
+    const targetId = finalMessageId ?? textOrder[textOrder.length - 1];
+    return targetId && textByMessageId.has(targetId)
+      ? /** @type {string[]} */ (textByMessageId.get(targetId)).join("")
+      : "";
+  }
+
   /**
    * @param {string} taskId
    * @param {{full?: boolean, fields?: string[]}} [options]
@@ -1827,7 +1926,13 @@ export function createTaskManager({
       narrationTotalChars: fullNarration.length,
       narrationTruncated: truncated,
       ...(task.summaryOf ? { summaryOf: task.summaryOf } : {}),
-      ...(truncated ? { next: `Run taskferry_result with full: true on task_id "${taskId}" to see the complete narration` } : {}),
+      ...(task.incomplete === true ? { incomplete: true } : {}),
+      ...(task.finalMarker != null ? { finalMarker: task.finalMarker } : {}),
+      ...(task.incomplete === true
+        ? { next: `Task ${taskId} exited cleanly but produced no usable final output${task.finalMarker ? ` (--require-final-marker ${JSON.stringify(task.finalMarker)} did not match)` : " (empty message)"}; treat as incomplete` }
+        : truncated
+          ? { next: `Run taskferry_result with full: true on task_id "${taskId}" to see the complete narration` }
+          : {}),
       logPath: task.logPath,
     }, fields);
   }
