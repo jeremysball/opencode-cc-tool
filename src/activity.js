@@ -3,6 +3,7 @@ import fs from "node:fs";
 /** @typedef {{id: string, status: string, logPath?: string, prompt?: string, promptPreview?: string}} ActivityTask */
 /** @typedef {{text: string, narration?: string, outputWatermark: number, sourceLogBytes: number, inputBytes: number}} ActivitySnapshot */
 /** @typedef {{activity: string, outputWatermark: number, summaryFailed: boolean, cached: boolean}} ActivityResult */
+/** @typedef {{text: string|null, sessionId: string|null}} SummarizeOutcome */
 
 export const ACTIVITY_REFRESH_BYTES = 4096;
 export const DEFAULT_SUMMARIZER_TIMEOUT_MS = 180000;
@@ -121,6 +122,48 @@ export function readActivitySnapshot(logPath, options = {}) {
   }
 }
 
+// Reads the bytes appended to logPath since `fromOffset`, decodes them through
+// the same narration parser used for full snapshots, and returns a snapshot
+// whose `outputWatermark` still reflects the full current log size (so the
+// activity cache's per-task key shifts on every new chunk) but whose `narration`
+// only contains the delta. Used by the summarize path so the second (and later)
+// continue-session turn sends just the new narration, not the entire bounded
+// excerpt a fresh start would.
+// A `fromOffset` >= current size (log rotated or never grew) returns an empty
+// narration with the same watermark it would have produced had a chunk
+// arrived, so callers can distinguish "nothing new yet" from "no log at all."
+/**
+ * @param {string} logPath
+ * @param {number} fromOffset
+ * @param {{maxChars?: number}} [options]
+ */
+export function readDeltaNarration(logPath, fromOffset, { maxChars = DEFAULT_ACTIVITY_MAX_CHARS } = {}) {
+  let size;
+  try {
+    size = fs.statSync(logPath).size;
+  } catch {
+    return { text: "", narration: "", outputWatermark: 0, sourceLogBytes: 0, inputBytes: 0 };
+  }
+  if (!Number.isFinite(fromOffset) || fromOffset < 0) fromOffset = 0;
+  if (size <= fromOffset) {
+    return { text: "", narration: "", outputWatermark: size, sourceLogBytes: size, inputBytes: 0 };
+  }
+  const deltaBytes = size - fromOffset;
+  const buffer = Buffer.alloc(deltaBytes);
+  let fd;
+  try {
+    fd = fs.openSync(logPath, "r");
+    fs.readSync(fd, buffer, 0, deltaBytes, fromOffset);
+  } catch {
+    return { text: "", narration: "", outputWatermark: size, sourceLogBytes: size, inputBytes: 0 };
+  } finally {
+    if (fd != null) fs.closeSync(fd);
+  }
+  // maxBytes > deltaBytes preserves the entire delta (no head+tail bounding);
+  // only the char cap trims.
+  return snapshotNarration(buffer, { maxBytes: deltaBytes + 1, maxChars, outputWatermark: size });
+}
+
 /** @param {unknown} value @param {number} [maxChars] */
 export function sanitizeActivityText(value, maxChars = DEFAULT_ACTIVITY_MAX_CHARS) {
   if (typeof value !== "string") return "";
@@ -155,7 +198,7 @@ export function activityCacheKey(task, outputWatermark, summaryModel, maxWords, 
  * @param {string} [options.summaryModel]
  * @param {number} [options.maxWords]
  * @param {(task: ActivityTask) => ActivitySnapshot} [options.snapshot]
- * @param {(input: {task: ActivityTask, snapshot: ActivitySnapshot, maxWords: number, summaryModel: string, previousActivity: string|null}) => Promise<string>|string} [options.summarize]
+ * @param {(input: {task: ActivityTask, snapshot: ActivitySnapshot, maxWords: number, summaryModel: string, previousActivity: string|null, previousSessionId: string|null, lastSummarizedWatermark: number}) => Promise<SummarizeOutcome>|SummarizeOutcome} [options.summarize]
  * @param {() => number} [options.now]
  */
 export function createActivityCache({
@@ -165,7 +208,7 @@ export function createActivityCache({
   summaryModel = "opencode/hy3-free",
   maxWords = 200,
   snapshot = (task) => readActivitySnapshot(task.logPath || ""),
-  summarize = async ({ snapshot: current }) => current.text,
+  summarize = async ({ snapshot: current }) => ({ text: current.text, sessionId: null }),
   now = Date.now,
 } = {}) {
   let summariesEnabledState = summariesEnabled;
@@ -176,6 +219,20 @@ export function createActivityCache({
   const lastRefresh = new Map();
   /** @type {Map<string, string>} */
   const lastSummarizedActivity = new Map();
+  // OpenCode session id of the most recent successful summary for this source
+  // task. The summarize-task spawner reads this and passes it to
+  // `opencode run --continue --session <id>` so the next turn lands in the
+  // same prompt-cached conversation instead of starting fresh. Cleared on
+  // failure so the next call retries against a brand-new session.
+  /** @type {Map<string, string>} */
+  const summarySessions = new Map();
+  // Source-log byte offset at the moment the most recent summary was taken.
+  // Mirrors the `outputWatermark` already on ActivitySnapshot but lives in
+  // the cache so callers outside the refresh path (the direct
+  // `taskferry summary` path that bypasses the cache) can compute the
+  // "narration since last summary" delta on the next call.
+  /** @type {Map<string, number>} */
+  const lastSummarizedWatermarks = new Map();
 
   /** @param {ActivityTask} task @param {{force?: boolean, includeSummary?: boolean, maxWords?: number}} [options] @returns {Promise<ActivityResult|null>} */
   function refresh(task, { force = false, includeSummary, maxWords: requestedMaxWords } = {}) {
@@ -208,16 +265,38 @@ export function createActivityCache({
       if (resolvedIncludeSummary) {
         try {
           const previousActivity = lastSummarizedActivity.get(task.id) || null;
-          const summarized = await summarize({ task, snapshot: current, maxWords: resolvedMaxWords, summaryModel, previousActivity });
-          const text = sanitizeActivityText(summarized);
+          const previousSessionId = summarySessions.get(task.id) || null;
+          const priorWatermark = lastSummarizedWatermarks.get(task.id) || 0;
+          const summarized = await summarize({
+            task,
+            snapshot: current,
+            maxWords: resolvedMaxWords,
+            summaryModel,
+            previousActivity,
+            previousSessionId,
+            lastSummarizedWatermark: priorWatermark,
+          });
+          const summarizedText = summarized && typeof summarized.text === "string" ? summarized.text : "";
+          const text = sanitizeActivityText(summarizedText);
           if (text) {
             activity = text;
             lastSummarizedActivity.set(task.id, text);
+            lastSummarizedWatermarks.set(task.id, outputWatermark);
+            if (summarized && typeof summarized.sessionId === "string" && summarized.sessionId) {
+              summarySessions.set(task.id, summarized.sessionId);
+            }
           } else {
             summaryFailed = true;
+            // Treat empty output as "the cached state is unreliable" so the next
+            // call retries fresh rather than resuming a session that produced
+            // nothing usable.
+            summarySessions.delete(task.id);
+            lastSummarizedWatermarks.delete(task.id);
           }
         } catch {
           summaryFailed = true;
+          summarySessions.delete(task.id);
+          lastSummarizedWatermarks.delete(task.id);
         }
       }
       const result = { activity, outputWatermark, summaryFailed, cached: false };
@@ -235,6 +314,23 @@ export function createActivityCache({
     inFlight,
     setSummariesEnabled: /** @param {boolean} value */ (value) => {
       summariesEnabledState = value === true;
+    },
+    /** @param {string} taskId @returns {string|null} */
+    getSummarySessionId: (taskId) => summarySessions.get(taskId) || null,
+    /** @param {string} taskId @returns {number} */
+    getLastSummarizedWatermark: (taskId) => lastSummarizedWatermarks.get(taskId) || 0,
+    /** @param {string} taskId @param {string} sessionId */
+    setSummarySessionId: (taskId, sessionId) => {
+      if (sessionId) summarySessions.set(taskId, sessionId);
+    },
+    /** @param {string} taskId @param {number} watermark */
+    setLastSummarizedWatermark: (taskId, watermark) => {
+      if (Number.isFinite(watermark) && watermark >= 0) lastSummarizedWatermarks.set(taskId, watermark);
+    },
+    /** @param {string} taskId */
+    clearSummaryState: (taskId) => {
+      summarySessions.delete(taskId);
+      lastSummarizedWatermarks.delete(taskId);
     },
   };
 }
