@@ -7,6 +7,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { withFileLock } from "./state-lock.js";
 import { PROTOCOL_VERSION, encodeMessage } from "./protocol.js";
+import { loadConfig } from "./config.js";
 
 const DAEMON_ENTRY = fileURLToPath(new URL("./daemon.js", import.meta.url));
 
@@ -73,12 +74,14 @@ export function ensureDaemonStarted({
   withLockFn = withFileLock,
   isDaemonReadySync = daemonReadySync,
   spawnDaemonFn = spawnDaemon,
+  loadConfigFn = loadConfig,
 } = {}) {
   fs.mkdirSync(runtimeDir, { recursive: true, mode: 0o700 });
   fs.chmodSync(runtimeDir, 0o700);
   const lockPath = path.join(runtimeDir, "daemon-start.lock");
   return withLockFn(lockPath, () => {
     if (isDaemonReadySync(socketPath)) return false;
+    loadConfigFn({ env });
     spawnDaemonFn({ env, stateDir, runtimeDir, socketPath });
     const deadline = Date.now() + startupTimeoutMs;
     while (Date.now() < deadline) {

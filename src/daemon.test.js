@@ -560,6 +560,27 @@ describe("multiplexed daemon client", () => {
     assert.equal(fs.existsSync(path.join(paths.runtimeDir, "daemon-start.lock")), false);
   });
 
+  test("propagates a loadConfig() error without calling spawnDaemonFn", (t) => {
+    const paths = temporaryPaths(t);
+    fs.mkdirSync(paths.runtimeDir, { recursive: true });
+    let spawns = 0;
+    const options = {
+      ...paths,
+      startupTimeoutMs: 100,
+      retryDelayMs: 1,
+      isDaemonReadySync: () => false,
+      spawnDaemonFn: () => {
+        spawns++;
+      },
+      loadConfigFn: () => {
+        throw new Error("error: could not parse /fake/config.json: bad json\nhelp: fix it");
+      },
+    };
+
+    assert.throws(() => ensureDaemonStarted(options), /error: could not parse \/fake\/config\.json/);
+    assert.equal(spawns, 0);
+  });
+
   test("reports bounded startup failures with actionable help", async (t) => {
     const paths = temporaryPaths(t);
     await assert.rejects(
