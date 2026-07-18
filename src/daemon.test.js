@@ -540,6 +540,7 @@ describe("multiplexed daemon client", () => {
     let lockCalls = 0;
     const options = {
       ...paths,
+      env: { ...process.env, XDG_CONFIG_HOME: path.join(paths.root, "config") },
       startupTimeoutMs: 100,
       retryDelayMs: 1,
       withLockFn(lockPath, callback, lockOptions) {
