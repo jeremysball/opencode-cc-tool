@@ -1752,6 +1752,46 @@ describe("summarize()", () => {
     assert.equal(fs.existsSync(attachment), false);
   });
 
+  test("writes a previous_summary field into the snapshot attachment when previousActivity is given", async () => {
+    let capturedSnapshot;
+    const child = fakeChild();
+    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Investigated the issue" } });
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": log },
+      spawnFn: (command, args) => {
+        const attachment = args[args.indexOf("-f") + 1];
+        capturedSnapshot = JSON.parse(fs.readFileSync(attachment, "utf8"));
+        return child;
+      },
+    });
+
+    await mgr.summarize("source", { maxWords: 150, previousActivity: "Read the config file." });
+
+    assert.equal(capturedSnapshot.previous_summary, "Read the config file.");
+    child.emit("exit", 0, null);
+  });
+
+  test("omits previous_summary from the snapshot attachment when there is no prior activity", async () => {
+    let capturedSnapshot;
+    const child = fakeChild();
+    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Investigated the issue" } });
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": log },
+      spawnFn: (command, args) => {
+        const attachment = args[args.indexOf("-f") + 1];
+        capturedSnapshot = JSON.parse(fs.readFileSync(attachment, "utf8"));
+        return child;
+      },
+    });
+
+    await mgr.summarize("source", { maxWords: 150 });
+
+    assert.equal("previous_summary" in capturedSnapshot, false);
+    child.emit("exit", 0, null);
+  });
+
   test("does not spend a model call when no text has been observed", async () => {
     let spawned = false;
     const mgr = makeManager({

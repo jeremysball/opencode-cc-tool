@@ -209,6 +209,28 @@ describe("activity summary cache", () => {
     assert.equal(result.activity.includes("\n"), false);
   });
 
+  test("passes the previous successful summary to the next summarize call, so the model can report only the delta", async () => {
+    const seenPreviousActivity = [];
+    let watermark = 10;
+    const cache = createActivityCache({
+      summariesEnabled: true,
+      minIntervalMs: 0,
+      snapshot: () => ({ text: "growing narration", outputWatermark: watermark }),
+      summarize: async ({ previousActivity }) => {
+        seenPreviousActivity.push(previousActivity);
+        return `summary at watermark ${watermark}`;
+      },
+    });
+
+    await cache.refresh(task, { force: true });
+    watermark = 20;
+    await cache.refresh(task, { force: true });
+    watermark = 30;
+    await cache.refresh(task, { force: true });
+
+    assert.deepEqual(seenPreviousActivity, [null, "summary at watermark 10", "summary at watermark 20"]);
+  });
+
   test("can disable secondary model calls for fallback-only operation", async () => {
     let calls = 0;
     const cache = createActivityCache({

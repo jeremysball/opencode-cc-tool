@@ -134,7 +134,7 @@ export function activityCacheKey(task, outputWatermark, summaryModel, maxWords, 
  * @param {string} [options.summaryModel]
  * @param {number} [options.maxWords]
  * @param {(task: ActivityTask) => ActivitySnapshot} [options.snapshot]
- * @param {(input: {task: ActivityTask, snapshot: ActivitySnapshot, maxWords: number, summaryModel: string}) => Promise<string>|string} [options.summarize]
+ * @param {(input: {task: ActivityTask, snapshot: ActivitySnapshot, maxWords: number, summaryModel: string, previousActivity: string|null}) => Promise<string>|string} [options.summarize]
  * @param {() => number} [options.now]
  */
 export function createActivityCache({
@@ -153,6 +153,8 @@ export function createActivityCache({
   /** @type {Map<string, Promise<ActivityResult>>} */
   const inFlight = new Map();
   const lastRefresh = new Map();
+  /** @type {Map<string, string>} */
+  const lastSummarizedActivity = new Map();
 
   /** @param {ActivityTask} task @param {{force?: boolean, includeSummary?: boolean, maxWords?: number}} [options] @returns {Promise<ActivityResult|null>} */
   function refresh(task, { force = false, includeSummary, maxWords: requestedMaxWords } = {}) {
@@ -184,10 +186,15 @@ export function createActivityCache({
       let summaryFailed = false;
       if (resolvedIncludeSummary) {
         try {
-          const summarized = await summarize({ task, snapshot: current, maxWords: resolvedMaxWords, summaryModel });
+          const previousActivity = lastSummarizedActivity.get(task.id) || null;
+          const summarized = await summarize({ task, snapshot: current, maxWords: resolvedMaxWords, summaryModel, previousActivity });
           const text = sanitizeActivityText(summarized);
-          if (text) activity = text;
-          else summaryFailed = true;
+          if (text) {
+            activity = text;
+            lastSummarizedActivity.set(task.id, text);
+          } else {
+            summaryFailed = true;
+          }
         } catch {
           summaryFailed = true;
         }
