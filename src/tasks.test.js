@@ -266,6 +266,194 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
   });
 });
 
+describe("output-completeness check at settlement time (issue #35)", () => {
+  function writeLog(logPath, lines) {
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    fs.writeFileSync(logPath, lines.map((line) => JSON.stringify(line)).join("\n"));
+  }
+
+  test("a clean done task with a final message is not flagged incomplete", () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    writeLog(dispatched.logPath, [
+      { type: "text", part: { messageID: "m1", text: "Final answer" } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    child.emit("exit", 0, null);
+    const settled = mgr.status(dispatched.id);
+    assert.equal(settled.status, "done");
+    assert.equal("incomplete" in settled, false);
+    assert.equal("finalMarker" in settled, false);
+    assert.equal(mgr.result(dispatched.id).message, "Final answer");
+  });
+
+  test("a clean done task with an empty final message is flagged incomplete", () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    writeLog(dispatched.logPath, [
+      { type: "text", part: { messageID: "m1", text: "" } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    child.emit("exit", 0, null);
+    const settled = mgr.status(dispatched.id);
+    assert.equal(settled.status, "done");
+    assert.equal(settled.incomplete, true);
+    const r = mgr.result(dispatched.id);
+    assert.equal(r.incomplete, true);
+    assert.match(r.next, /no usable final output/);
+  });
+
+  test("a clean done task with only whitespace in the final message is flagged incomplete", () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    writeLog(dispatched.logPath, [
+      { type: "text", part: { messageID: "m1", text: "   \n\t  " } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    child.emit("exit", 0, null);
+    assert.equal(mgr.status(dispatched.id).incomplete, true);
+  });
+
+  test("--require-final-marker with a matching message leaves the task as a normal done", () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({
+      prompt: "hi",
+      directory: os.tmpdir(),
+      finalMarker: "^Status: DONE$",
+    });
+    writeLog(dispatched.logPath, [
+      { type: "text", part: { messageID: "m1", text: "Status: DONE" } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    child.emit("exit", 0, null);
+    const settled = mgr.status(dispatched.id);
+    assert.equal(settled.status, "done");
+    assert.equal("incomplete" in settled, false);
+    assert.equal(settled.finalMarker, "^Status: DONE$");
+    const r = mgr.result(dispatched.id, { fields: ["message", "incomplete", "finalMarker"] });
+    assert.equal(r.incomplete, null);
+    assert.equal(r.finalMarker, "^Status: DONE$");
+    assert.equal(r.message, "Status: DONE");
+  });
+
+  test("--require-final-marker with a non-matching message flags the task incomplete", () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({
+      prompt: "hi",
+      directory: os.tmpdir(),
+      finalMarker: "^Status: DONE$",
+    });
+    writeLog(dispatched.logPath, [
+      { type: "text", part: { messageID: "m1", text: "I forgot to follow the contract" } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    child.emit("exit", 0, null);
+    const settled = mgr.status(dispatched.id);
+    assert.equal(settled.status, "done");
+    assert.equal(settled.incomplete, true);
+    assert.equal(settled.finalMarker, "^Status: DONE$");
+    const r = mgr.result(dispatched.id);
+    assert.equal(r.incomplete, true);
+    assert.match(r.next, /--require-final-marker "\^Status: DONE\$" did not match/);
+  });
+
+  test("--require-final-marker combined with an empty message is flagged for both reasons", () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({
+      prompt: "hi",
+      directory: os.tmpdir(),
+      finalMarker: "^Status: DONE$",
+    });
+    writeLog(dispatched.logPath, [
+      { type: "text", part: { messageID: "m1", text: "" } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    child.emit("exit", 0, null);
+    assert.equal(mgr.status(dispatched.id).incomplete, true);
+  });
+
+  test("crashed and cancelled tasks are not relabeled as incomplete", () => {
+    const crashChild = fakeChild();
+    const crashMgr = makeManager({ spawnFn: () => crashChild });
+    const crashTask = crashMgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    writeLog(crashTask.logPath, [
+      { type: "text", part: { messageID: "m1", text: "" } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    crashChild.emit("exit", 1, null);
+    assert.equal(crashMgr.status(crashTask.id).status, "crashed");
+    assert.equal("incomplete" in crashMgr.status(crashTask.id), false);
+
+    const cancelChild = fakeChild();
+    const cancelMgr = makeManager({ spawnFn: () => cancelChild, killFn: () => {} });
+    const cancelTask = cancelMgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    cancelMgr.cancel(cancelTask.id);
+    writeLog(cancelTask.logPath, [
+      { type: "text", part: { messageID: "m1", text: "" } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    cancelChild.emit("exit", null, "SIGTERM");
+    assert.equal(cancelMgr.status(cancelTask.id).status, "cancelled");
+    assert.equal("incomplete" in cancelMgr.status(cancelTask.id), false);
+  });
+
+  test("dispatch rejects an invalid regex source up front (before queueing)", () => {
+    const mgr = makeManager({ spawnFn: () => fakeChild() });
+    assert.throws(
+      () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), finalMarker: "(unclosed" }),
+      (error) => {
+        assert.match(error.message, /--require-final-marker is not a valid RegExp/);
+        return true;
+      }
+    );
+  });
+
+  test("incomplete and finalMarker survive a daemon restart via tasks.json", () => {
+    const child = fakeChild();
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-restart-"));
+    const logDir = path.join(stateDir, "logs");
+    fs.mkdirSync(logDir, { recursive: true });
+
+    const mgr1 = createTaskManager({
+      stateDir,
+      spawnFn: () => child,
+      killFn: () => {},
+      listModelsFn: () => "opencode/hy3-free\n",
+      verifySummaryAgentFn: async () => {},
+    });
+    const dispatched = mgr1.dispatch({
+      prompt: "hi",
+      directory: os.tmpdir(),
+      finalMarker: "^Status: DONE$",
+    });
+    const logPath = dispatched.logPath;
+    writeLog(logPath, [
+      { type: "text", part: { messageID: "m1", text: "no marker here" } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    child.emit("exit", 0, null);
+    assert.equal(mgr1.status(dispatched.id).incomplete, true);
+
+    const mgr2 = createTaskManager({
+      stateDir,
+      spawnFn: () => { throw new Error("not used"); },
+      killFn: () => {},
+      listModelsFn: () => "opencode/hy3-free\n",
+      verifySummaryAgentFn: async () => {},
+    });
+    const reloaded = mgr2.status(dispatched.id);
+    assert.equal(reloaded.status, "done");
+    assert.equal(reloaded.incomplete, true);
+    assert.equal(reloaded.finalMarker, "^Status: DONE$");
+  });
+});
+
 describe("dispatch queue", () => {
   test("launches at most two tasks per window and starts queued tasks FIFO", async () => {
     const children = [];

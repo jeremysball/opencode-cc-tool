@@ -11,6 +11,8 @@ const RESULT_FIELDS = new Set([
   "failureDetail",
   "keySlot",
   "logPath",
+  "incomplete",
+  "finalMarker",
 ]);
 
 const commandSpecs = {
@@ -24,10 +26,12 @@ const commandSpecs = {
       "--variant <name>": "optional model reasoning variant",
       "--session-id <id>": "resume an existing OpenCode session",
       "--key-slot <name>": "use a configured provider key slot",
+      "--require-final-marker <regex>": "flag the task as incomplete if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics)",
     },
     examples: [
       'taskferry dispatch --prompt "Fix the failing tests"',
       'taskferry dispatch --prompt "Review this change" --model openai/gpt-5.6-sol',
+      'taskferry dispatch --prompt "Investigate" --require-final-marker "^Status: (DONE|DONE_WITH_CONCERNS|BLOCKED)$"',
     ],
   },
   cancel: {
@@ -238,7 +242,7 @@ function parseFields(value) {
 function defaultOptions(command, cwd) {
   switch (command) {
     case "dispatch":
-      return { prompt: undefined, directory: cwd, model: undefined, variant: undefined, sessionId: undefined, keySlot: undefined };
+      return { prompt: undefined, directory: cwd, model: undefined, variant: undefined, sessionId: undefined, keySlot: undefined, finalMarker: undefined };
     case "advisor":
       return { prompt: undefined, model: undefined, directory: cwd, variant: undefined, sessionId: undefined, timeoutMs: undefined };
     case "cancel":
@@ -350,6 +354,7 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       "--limit": "limit",
       "--format": "format",
       "--task-id": "taskId",
+      "--require-final-marker": "finalMarker",
     };
     const key = values[name];
     if (!key || !commandAllows(command, name)) throw usageError(`unknown flag ${name} for \`${command}\``, command);
@@ -365,6 +370,12 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       if (!allowed.includes(value)) throw new UsageError(`${name} must be one of ${allowed.join(", ")}`, `Use ${name} with one of: ${allowed.join(", ")}`);
     } else if (key === "style" && !["report", "activity"].includes(value)) {
       throw new UsageError(`${name} must be one of report, activity`, "Use --style report or --style activity");
+    } else if (key === "finalMarker") {
+      try {
+        new RegExp(value);
+      } catch (err) {
+        throw new UsageError(`${name} is not a valid RegExp: ${err.message}`, "Use --require-final-marker with a pattern that compiles as a standard JS RegExp");
+      }
     }
     setOption(options, key, value, command, seen);
   }
@@ -394,7 +405,7 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
 
 function commandAllows(command, flag) {
   const flags = {
-    dispatch: ["--prompt", "--directory", "--model", "--variant", "--session-id", "--key-slot"],
+    dispatch: ["--prompt", "--directory", "--model", "--variant", "--session-id", "--key-slot", "--require-final-marker"],
     cancel: ["--grace-ms"],
     wait: ["--timeout-ms", "--tail-chars"],
     advisor: ["--prompt", "--model", "--directory", "--variant", "--session-id", "--timeout-ms"],

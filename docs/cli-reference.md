@@ -52,6 +52,7 @@ a background child process and returns a task summary immediately.
 | `--variant <name>` | Reasoning-effort override (`high`, `max`, `minimal`, ...), applied only alongside `--model` |
 | `--session-id <id>` | Resume an existing OpenCode session (`--continue --session <id>`) instead of starting fresh; get session ids from a prior `result` or `status --full` |
 | `--key-slot <name>` | Use a configured provider-key slot instead of the daemon's ambient key; see [security.md](security.md) |
+| `--require-final-marker <regex>` | Fail the task if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics). Sets `incomplete: true` on the settled task when the final message is empty (after trimming) or doesn't match. Patterns that don't compile as a standard JS RegExp reject the dispatch up front with a usage error. Useful for enforcing a report-format contract like `^Status: (DONE\|DONE_WITH_CONCERNS\|BLOCKED\|NEEDS_CONTEXT)$` on the last line of model output. |
 
 ```
 $ taskferry dispatch --prompt "Fix the failing tests" --directory /workspace/my-repo
@@ -152,7 +153,11 @@ provider-failure diagnostic (`"rate_limited"`, `"payment_required"`, or
 `failureDetail` (also `--full`-only, or via `result --fields
 failureDetail`) carries the matched log line or timeout detail behind
 whichever `failureReason` fired. `keySlot` echoes the `--key-slot` name the
-task was dispatched with, or `null`.
+task was dispatched with, or `null`. `incomplete` is `true` when a `done`
+task has an empty final message or one that doesn't match
+`--require-final-marker`; `finalMarker` echoes the regex pattern when one
+was supplied. Both fields only appear when set; otherwise they are
+omitted, matching the convention used by `failureReason`.
 
 ## `taskferry tail <id> [--chars <number>]`
 
@@ -188,10 +193,19 @@ A single-step run (no tool calls) has `message === narration`. Also returns
 `sessionId`, `tokens`, and `cost`. Returns a polite "still running" message
 instead of a partial result if called too early.
 
+A task that exits cleanly but whose final message is empty (after
+trimming), or that was dispatched with `--require-final-marker` and whose
+final message doesn't match the pattern, carries `incomplete: true`. The
+status remains `done`: this distinguishes "the child exited cleanly"
+(the existing axis) from "the child produced usable output" (the new axis).
+`finalMarker` echoes the regex pattern the task was dispatched with, when
+one was set, so a downstream caller can tell which side of the check
+tripped.
+
 | Flag | Notes |
 |---|---|
 | `--full` | Include untruncated narration; only valid when `narration` is in `--fields` |
-| `--fields <comma-list>` | Project only the fields you need: `message`, `narration`, `tokens`, `cost`, `sessionId`, `exitCode`, `signal`, `spawnError`, `failureReason`, `failureDetail`, `keySlot`, `logPath` |
+| `--fields <comma-list>` | Project only the fields you need: `message`, `narration`, `tokens`, `cost`, `sessionId`, `exitCode`, `signal`, `spawnError`, `failureReason`, `failureDetail`, `keySlot`, `logPath`, `incomplete`, `finalMarker` |
 
 ```
 $ taskferry result oc_mrn4ipkp_19450105

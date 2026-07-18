@@ -27,6 +27,7 @@ test("parses dispatch and applies its argument defaults", () => {
       variant: undefined,
       sessionId: undefined,
       keySlot: undefined,
+      finalMarker: undefined,
     },
     help: false,
   });
@@ -181,4 +182,24 @@ test("parses wait --summarize and rejects it combined with --timeout-ms or --tai
   });
   assert.throws(() => parseArgs(["wait", "oc_1", "--summarize", "--timeout-ms", "5000"]), /--summarize cannot be combined with --timeout-ms/);
   assert.throws(() => parseArgs(["wait", "oc_1", "--summarize", "--tail-chars", "500"]), /--summarize cannot be combined with --tail-chars/);
+});
+
+test("parses dispatch --require-final-marker and rejects invalid regex sources", () => {
+  assert.equal(
+    parseArgs(["dispatch", "--prompt", "x", "--require-final-marker", "^Status: (DONE|DONE_WITH_CONCERNS)$"]).options.finalMarker,
+    "^Status: (DONE|DONE_WITH_CONCERNS)$"
+  );
+  assert.equal(parseArgs(["dispatch", "--prompt", "x", "--require-final-marker=foo.*bar"]).options.finalMarker, "foo.*bar");
+  assert.throws(
+    () => parseArgs(["dispatch", "--prompt", "x", "--require-final-marker", "(unclosed"]),
+    (error) => {
+      assert.ok(error instanceof UsageError);
+      assert.match(error.message, /--require-final-marker is not a valid RegExp/);
+      assert.match(error.help, /standard JS RegExp/);
+      assert.equal(error.exitCode, 2);
+      return true;
+    }
+  );
+  assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--require-final-marker"]), /requires a value/);
+  assert.throws(() => parseArgs(["wait", "oc_1", "--require-final-marker", "foo"]), /unknown flag --require-final-marker/);
 });
