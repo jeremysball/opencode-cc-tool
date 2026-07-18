@@ -85,7 +85,8 @@ All `TASKFERRY_*` vars the daemon or CLI reads, gathered in one place
 | `TASKFERRY_SOCKET_PATH` | `<runtime-dir>/daemon.sock` | Explicit socket override |
 | `TASKFERRY_MAX_CONCURRENT_TASKS` | `4` | Running-task concurrency cap |
 | `TASKFERRY_MAX_DISPATCHES_PER_WINDOW` / `TASKFERRY_DISPATCH_WINDOW_MS` | `2` / `5000` | Dispatch burst-rate limit |
-| `TASKFERRY_NO_OUTPUT_TIMEOUT_MS` | `120000` | Pre-output-seen watchdog deadline |
+| `TASKFERRY_NO_OUTPUT_TIMEOUT_MS` | `256000` (~4.3 min) | Pre-output-seen watchdog deadline |
+| `TASKFERRY_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS` | `400000` (~6.7 min) | Watchdog deadline once a task has produced its first log event |
 | `TASKFERRY_WATCHDOG_POLL_MS` | `2000` | Watchdog check interval |
 | `TASKFERRY_KEY_SLOTS` | — | Named provider-key slot registry; see `docs/security.md` |
 | `TASKFERRY_PROVIDER_KEY_ENV` | — | Source env var a key slot copies from |
@@ -112,3 +113,7 @@ All `TASKFERRY_*` vars the daemon or CLI reads, gathered in one place
   the plugin (see `docs/integrations/claude-code.md`), not synced from or
   to the canonical `skills/using-taskferry/SKILL.md`. Edit the canonical file,
   run `npm run skill:generate`, then re-copy to `~/.claude/skills/` by hand.
+- The daemon restarting itself with no `taskferry` command involved — expected
+  when a source `.js` file's mtime moved forward since startup (a merge
+  landed) and no tasks were running/queued; see
+  `docs/daemon.md#self-restart-on-source-change`.

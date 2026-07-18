@@ -367,6 +367,103 @@ describe("Unix socket daemon", () => {
     const statuses = await Promise.all(persisted.map((task, index) => peer.request(`status-${index}`, "task.status", { taskId: task.id })));
     assert.deepEqual(statuses.map((response) => response.result.status), ["unknown", "unknown"]);
   });
+
+  describe("self-restart on source change", () => {
+    function sourceFixture(t) {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-daemon-source-"));
+      t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+      const entry = path.join(dir, "daemon.js");
+      fs.writeFileSync(entry, "// fixture entry, never actually executed by these tests\n");
+      return { dir, entry };
+    }
+
+    test("does not restart while source is unchanged, even with a spawn stub wired up", async (t) => {
+      const paths = temporaryPaths(t);
+      const { dir, entry } = sourceFixture(t);
+      const fake = fakeManagerFactory();
+      const spawnCalls = [];
+      const daemon = await startDaemon({
+        ...paths,
+        taskManagerFactory: fake.factory,
+        sourceDir: dir,
+        daemonEntry: entry,
+        spawnReplacement: (args) => spawnCalls.push(args),
+      });
+      t.after(() => daemon.close());
+      const peer = await openPeer(paths.socketPath);
+      t.after(() => peer.close());
+
+      await peer.request("health", "system.health");
+      await peer.request("health-2", "system.health");
+
+      assert.equal(spawnCalls.length, 0);
+    });
+
+    test("restarts immediately when idle and a source file changes after startup", async (t) => {
+      const paths = temporaryPaths(t);
+      const { dir, entry } = sourceFixture(t);
+      const fake = fakeManagerFactory();
+      const spawnCalls = [];
+      let exitCalls = 0;
+      const daemon = await startDaemon({
+        ...paths,
+        taskManagerFactory: fake.factory,
+        sourceDir: dir,
+        daemonEntry: entry,
+        spawnReplacement: (args) => spawnCalls.push(args),
+        exitProcess: () => { exitCalls++; },
+      });
+      t.after(() => daemon.close());
+      const peer = await openPeer(paths.socketPath);
+
+      // Bump mtime forward unambiguously — same-millisecond edits on a fast
+      // filesystem could otherwise leave mtimeMs unchanged.
+      const bumped = new Date(Date.now() + 60_000);
+      fs.utimesSync(entry, bumped, bumped);
+
+      await peer.request("health", "system.health");
+      // The restart itself is async (close() + spawn + exit); give it a tick.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      assert.equal(spawnCalls.length, 1);
+      assert.equal(spawnCalls[0].daemonEntry, entry);
+      assert.equal(exitCalls, 1);
+      assert.equal(fs.existsSync(paths.socketPath), false);
+      peer.close();
+    });
+
+    test("defers restart until no tasks are running or queued", async (t) => {
+      const paths = temporaryPaths(t);
+      const { dir, entry } = sourceFixture(t);
+      const busyManagerFactory = () => ({
+        list: () => ({ counts: { queued: 0, running: 1, done: 0, crashed: 0, cancelled: 0, unknown: 0 }, tasks: [] }),
+        status: () => { throw new Error("unused"); },
+      });
+      const spawnCalls = [];
+      let exitCalls = 0;
+      const daemon = await startDaemon({
+        ...paths,
+        taskManagerFactory: busyManagerFactory,
+        sourceDir: dir,
+        daemonEntry: entry,
+        spawnReplacement: (args) => spawnCalls.push(args),
+        exitProcess: () => { exitCalls++; },
+      });
+      t.after(() => daemon.close());
+      const peer = await openPeer(paths.socketPath);
+      t.after(() => peer.close());
+
+      const bumped = new Date(Date.now() + 60_000);
+      fs.utimesSync(entry, bumped, bumped);
+
+      await peer.request("health", "system.health");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      assert.equal(spawnCalls.length, 0, "must not restart while a task is still running");
+      assert.equal(exitCalls, 0);
+      assert.equal(fs.existsSync(paths.socketPath), true);
+    });
+  });
 });
 
 describe("multiplexed daemon client", () => {

@@ -4,6 +4,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createTaskManager } from "./tasks.js";
 import { withFileLock } from "./state-lock.js";
@@ -18,6 +19,21 @@ import {
 } from "./protocol.js";
 
 const MAX_BUFFER_BYTES = 1024 * 1024;
+const DAEMON_ENTRY = fileURLToPath(import.meta.url);
+const SOURCE_DIR = path.dirname(DAEMON_ENTRY);
+
+// Detects a source-code update (e.g. a merge picked up while the daemon was
+// running) so the daemon can restart itself onto the new code. Recomputed
+// after every request and compared against the value captured at startup.
+function sourceSignature(dir = SOURCE_DIR) {
+  let max = 0;
+  for (const entry of fs.readdirSync(dir)) {
+    if (!entry.endsWith(".js")) continue;
+    const { mtimeMs } = fs.statSync(path.join(dir, entry));
+    if (mtimeMs > max) max = mtimeMs;
+  }
+  return max;
+}
 
 export function resolveStateDir(env = process.env) {
   return env.TASKFERRY_STATE_DIR
@@ -32,6 +48,10 @@ export function resolveRuntimeDir({ env = process.env, stateDir = resolveStateDi
 
 export function resolveSocketPath(options = {}) {
   return options.socketPath || options.env?.TASKFERRY_SOCKET_PATH || path.join(resolveRuntimeDir(options), "daemon.sock");
+}
+
+function defaultSpawnReplacement({ daemonEntry, env }) {
+  spawn(process.execPath, [daemonEntry], { detached: true, stdio: "ignore", env }).unref();
 }
 
 function socketHealth(socketPath, timeoutMs) {
@@ -238,6 +258,10 @@ export async function startDaemon({
   maxInFlightRequests = 256,
   taskManagerFactory = createTaskManager,
   taskManagerOptions = {},
+  sourceDir = SOURCE_DIR,
+  daemonEntry = DAEMON_ENTRY,
+  spawnReplacement = defaultSpawnReplacement,
+  exitProcess = () => process.exit(0),
 } = {}) {
   if (platform !== "linux" && platform !== "darwin") {
     throw new Error("error: taskferry daemon supports Linux and macOS only\nhelp: run taskferry on a Unix host with Unix-domain socket support");
@@ -264,6 +288,9 @@ export async function startDaemon({
     }
   };
   const manager = taskManagerFactory({ ...taskManagerOptions, stateDir, onEvent });
+  const startupSourceSignature = sourceSignature(sourceDir);
+  let restartPending = false;
+  let restarting = false;
   const updateSummarySubscriptions = () => {
     if (typeof manager.setActivitySummarySubscriptions !== "function") return;
     manager.setActivitySummarySubscriptions(Array.from(subscriptions.values()).filter((subscription) => subscription.summaries).length);
@@ -332,6 +359,7 @@ export async function startDaemon({
             if (!socket.destroyed) writeMessage(socket, responseError(error, request?.id ?? null));
           } finally {
             inFlightRequests--;
+            maybeRestart();
           }
         })();
       }
@@ -349,31 +377,51 @@ export async function startDaemon({
   fs.chmodSync(socketPath, 0o600);
 
   let closing;
+  function close() {
+    if (closing) return closing;
+    closing = new Promise((resolve, reject) => {
+      for (const socket of clients) socket.destroy();
+      server.close((error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        try {
+          fs.unlinkSync(socketPath);
+        } catch (unlinkError) {
+          if (unlinkError.code !== "ENOENT") {
+            reject(unlinkError);
+            return;
+          }
+        }
+        resolve();
+      });
+    });
+    return closing;
+  }
+
+  // Deferred-until-idle restart: a source change is detected any time after
+  // startup, but the actual restart waits for zero running/queued tasks so an
+  // in-flight opencode child is never orphaned mid-task by the daemon
+  // swapping itself out from under it.
+  function maybeRestart() {
+    if (restarting) return;
+    if (!restartPending && sourceSignature(sourceDir) !== startupSourceSignature) restartPending = true;
+    if (!restartPending) return;
+    const { counts } = manager.list();
+    if (counts.running > 0 || counts.queued > 0) return;
+    restarting = true;
+    void (async () => {
+      await close();
+      spawnReplacement({ daemonEntry, env });
+      exitProcess();
+    })();
+  }
+
   return {
     socketPath,
     stats: () => ({ connections: clients.size, subscriptions: subscriptions.size }),
-    close() {
-      if (closing) return closing;
-      closing = new Promise((resolve, reject) => {
-        for (const socket of clients) socket.destroy();
-        server.close((error) => {
-          if (error) {
-            reject(error);
-            return;
-          }
-          try {
-            fs.unlinkSync(socketPath);
-          } catch (unlinkError) {
-            if (unlinkError.code !== "ENOENT") {
-              reject(unlinkError);
-              return;
-            }
-          }
-          resolve();
-        });
-      });
-      return closing;
-    },
+    close,
   };
 }
 
