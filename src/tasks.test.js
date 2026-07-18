@@ -2131,6 +2131,225 @@ describe("summarize()", () => {
     assert.match(snapshot.narration, /bytes omitted from source log/);
     child.emit("exit", 0, null);
   });
+
+  // Drives a single spawned summary child through its lifecycle (write a
+  // sessionID into its log so readSessionIdFromLog returns it, then fire the
+  // exit event). The default fakeChild never logs anything, so without this
+  // step the cache wouldn't get a session id to persist for the next call.
+  // Returns the summary task id (looked up by summaryOf.sourceTaskId) and the
+  // fakeChild handle so the caller can keep emitting further exits.
+  async function settleSummaryChildWithSessionId(mgr, summaryTaskId, sessionId, finalText = "current state") {
+    const persisted = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
+    const summary = persisted.find((task) => task.id === summaryTaskId);
+    if (!summary) throw new Error(`no summary task ${summaryTaskId} persisted`);
+    fs.writeFileSync(
+      summary.logPath,
+      [
+        JSON.stringify({ sessionID: sessionId, type: "step_start" }),
+        JSON.stringify({ type: "text", part: { messageID: "answer", text: finalText } }),
+        JSON.stringify({ type: "step_finish", part: { messageID: "answer", reason: "stop" } }),
+      ].join("\n")
+    );
+  }
+
+  test("first summarize call spawns with no --continue/--session flags and writes the full bounded excerpt", async () => {
+    let firstArgs;
+    let firstSnapshot;
+    const child = fakeChild();
+    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Inspect the daemon" } });
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": log },
+      spawnFn: (_command, args) => {
+        firstArgs = args;
+        firstSnapshot = JSON.parse(fs.readFileSync(args[args.indexOf("-f") + 1], "utf8"));
+        return child;
+      },
+    });
+
+    const started = await mgr.summarize("source", { maxWords: 150 });
+    assert.ok(started.summaryTask);
+
+    assert.equal(firstArgs.includes("--continue"), false);
+    assert.equal(firstArgs.includes("--session"), false);
+    assert.match(firstSnapshot.narration, /Inspect the daemon/);
+    assert.equal(firstSnapshot.narration_is_delta, undefined);
+
+    await settleSummaryChildWithSessionId(mgr, started.summaryTask.id, "ses_first");
+    child.emit("exit", 0, null);
+  });
+
+  test("second summarize call continues the prior session and sends only the narration delta (not the full bounded excerpt)", async () => {
+    const children = [];
+    const captures = [];
+    const initialLog = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Reading the config" } });
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": initialLog },
+      spawnFn: (_command, args) => {
+        const child = fakeChild(5000 + children.length);
+        children.push(child);
+        captures.push({ args, attachment: args[args.indexOf("-f") + 1] });
+        return child;
+      },
+    });
+
+    // First call: no continuation flags, snapshot uses the full bounded excerpt.
+    const firstStarted = await mgr.summarize("source", { maxWords: 150 });
+    const firstSnapshot = JSON.parse(fs.readFileSync(captures[0].attachment, "utf8"));
+    assert.equal(captures[0].args.includes("--continue"), false);
+    assert.equal(captures[0].args.includes("--session"), false);
+    assert.match(firstSnapshot.narration, /Reading the config/);
+
+    // Simulate the first summary task settling and handing its session id
+    // back via the cache's setSummarySessionId path (startTask's exit handler
+    // does this in production).
+    await settleSummaryChildWithSessionId(mgr, firstStarted.summaryTask.id, "ses_first");
+    children[0].emit("exit", 0, null);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Grow the source log; the second turn must see only the appended bytes.
+    fs.appendFileSync(firstStarted.sourceTaskId && path.join(mgr.paths.LOG_DIR, `${firstStarted.sourceTaskId}.ndjson`), "");
+
+    // Read the source task's persisted logPath and append new content so the
+    // next summarize call sees a real delta.
+    const persistedTasks = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
+    const source = persistedTasks.find((t) => t.id === "source");
+    fs.appendFileSync(source.logPath, JSON.stringify({ type: "text", part: { messageID: "m2", text: "New step completed" } }) + "\n");
+
+    // Second call: must continue the prior session, send only the delta, and
+    // include the previous summary so the model can stitch them together.
+    const secondStarted = await mgr.summarize("source", { maxWords: 150, previousActivity: "Read the config." });
+    const secondArgs = captures[1].args;
+    const secondSnapshot = JSON.parse(fs.readFileSync(captures[1].attachment, "utf8"));
+
+    assert.ok(secondStarted.summaryTask);
+    assert.equal(secondArgs.includes("--continue"), true);
+    assert.ok(secondArgs.includes("--session"));
+    const sessionIdx = secondArgs.indexOf("--session");
+    assert.equal(secondArgs[sessionIdx + 1], "ses_first");
+    // Delta-only: includes the newly appended narration, omits the old prefix.
+    assert.match(secondSnapshot.narration, /New step completed/);
+    assert.equal(secondSnapshot.narration.includes("Reading the config"), false);
+    assert.equal(secondSnapshot.narration_is_delta, true);
+    assert.equal(secondSnapshot.previous_summary, "Read the config.");
+
+    // Clean up the spawned summary children.
+    await settleSummaryChildWithSessionId(mgr, secondStarted.summaryTask.id, "ses_second", "delta-only result");
+    children[1].emit("exit", 0, null);
+  });
+
+  test("continue-fails-so-fresh: summarizeActivity detects a session-id mismatch and retries fresh, leaving the cache clear of the stale id", async () => {
+    const captures = [];
+    const children = [];
+    const initialLog = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Reading the config" } }) + "\n";
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": initialLog },
+      spawnFn: (_command, args) => {
+        captures.push({ args, attachment: args[args.indexOf("-f") + 1] });
+        const child = fakeChild(7000 + captures.length);
+        children.push(child);
+        return child;
+      },
+    });
+
+    // Seed the cache the same way startTask's exit handler would after a
+    // prior successful summarize call: it stores the spawn's opencode
+    // session id and the source-log watermark at summarize time. The watermark
+    // is the byte size of the source log right now, so summarizeTask's
+    // rotation check (`watermark > currentSize`) won't kick in and discard it.
+    const sourceLogPath = path.join(fs.realpathSync(mgr.paths.LOG_DIR), "source.ndjson");
+    const initialSize = fs.statSync(sourceLogPath).size;
+    mgr.activityCache.setSummarySessionId("source", "ses_cached");
+    mgr.activityCache.setLastSummarizedWatermark("source", initialSize);
+
+    // Grow the source log so a delta exists for the next turn.
+    const sourceTaskPersisted = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8")).find((t) => t.id === "source");
+    const appendedLine = JSON.stringify({ type: "text", part: { messageID: "m2", text: "More work done" } }) + "\n";
+    fs.appendFileSync(sourceTaskPersisted.logPath, appendedLine);
+
+    // Kick off the activity path: summarizeActivity will spawn #1 with
+    // --continue --session ses_cached, poll #1, see that the spawned child's
+    // log carries no matching session id, and spawn #2 fresh.
+    const refreshP = mgr.activityCache.refresh(
+      { id: "source", status: "running", logPath: sourceTaskPersisted.logPath },
+      { force: true, includeSummary: true }
+    );
+
+    // Wait for spawn #1 to land (synchronous inside summarizeTask).
+    while (captures.length < 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(captures[0].args.includes("--continue"));
+    assert.ok(captures[0].args.includes("--session"));
+    assert.equal(captures[0].args[captures[0].args.indexOf("--session") + 1], "ses_cached");
+    // Spawn #1's snapshot is a delta (we have a prior watermark and growth).
+    const firstSnapshot = JSON.parse(fs.readFileSync(captures[0].attachment, "utf8"));
+    assert.equal(firstSnapshot.narration_is_delta, true);
+
+    // Drive spawn #1's exit. The fakeChild's log is empty so its derived
+    // session id is null -- which doesn't match ses_cached, triggering the
+    // fallback path.
+    children[0].emit("exit", 0, null);
+    while (captures.length < 2) await new Promise((resolve) => setImmediate(resolve));
+
+    // Spawn #2 is the fresh retry: no --continue, no --session, full bounded excerpt.
+    const retryArgs = captures[1].args;
+    assert.equal(retryArgs.includes("--continue"), false);
+    assert.equal(retryArgs.includes("--session"), false);
+    const retrySnapshot = JSON.parse(fs.readFileSync(captures[1].attachment, "utf8"));
+    assert.equal(retrySnapshot.narration_is_delta, undefined);
+    assert.match(retrySnapshot.narration, /Reading the config/);
+    assert.match(retrySnapshot.narration, /More work done/);
+
+    // Drop a usable final message + sessionID into the retry's log so the
+    // activity-result we get back isn't summaryFailed. The retry's session
+    // id is what survives into the cache for the next call.
+    const persisted = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
+    const retries = persisted.filter((t) => t.summaryOf && t.summaryOf.sourceTaskId === "source");
+    assert.equal(retries.length, 2, "expected two summary tasks to have been queued");
+    fs.writeFileSync(
+      retries[1].logPath,
+      JSON.stringify({ sessionID: "ses_fresh_retry", type: "text", part: { messageID: "answer", text: "fresh retry output" } }) + "\n"
+        + JSON.stringify({ type: "step_finish", part: { messageID: "answer", reason: "stop" } }) + "\n"
+    );
+    children[1].emit("exit", 0, null);
+
+    const result = await refreshP;
+    assert.equal(result.summaryFailed, false);
+    assert.equal(result.activity, "fresh retry output");
+    // Cache ended up with the retry's session id (recorded by the exit
+    // handler), not the stale ses_cached or the mismatched first attempt.
+    assert.equal(mgr.activityCache.getSummarySessionId("source"), "ses_fresh_retry");
+    assert.notEqual(mgr.activityCache.getLastSummarizedWatermark("source"), initialSize);
+  });
+
+  test("summarizeTask's exit handler persists the opencode session id and the source-log watermark to the activity cache for the next turn", async () => {
+    const child = fakeChild();
+    const initialLog = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Investigating issue" } }) + "\n";
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": initialLog },
+      spawnFn: () => child,
+    });
+
+    const started = await mgr.summarize("source", { maxWords: 150 });
+    // Pre-settlement: cache has nothing for this task.
+    assert.equal(mgr.list().tasks.length, 2);
+
+    await settleSummaryChildWithSessionId(mgr, started.summaryTask.id, "ses_real");
+    child.emit("exit", 0, null);
+    // Allow the exit handler's microtasks (persist, activity update, etc.) to drain.
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Exit handler should have stamped the summary task with the spawned
+    // opencode session id read from its log, and persisted status=done to
+    // tasks.json. The activity-cache side effects (next-turn --session lookup)
+    // are exercised end-to-end by the second-call test above.
+    const persisted = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
+    const summary = persisted.find((task) => task.id === started.summaryTask.id);
+    assert.equal(summary.status, "done");
+    assert.equal(summary.sessionId, "ses_real");
+  });
 });
 
 describe("key slots (summary tasks)", () => {
