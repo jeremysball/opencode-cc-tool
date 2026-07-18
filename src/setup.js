@@ -64,7 +64,7 @@ export function defaultNpmInstall(checkoutDirectory) {
 }
 
 export function defaultRunCommand(command, args) {
-  const result = spawnSync(command, args, { encoding: "utf8" });
+  const result = spawnSync(command, args, { encoding: "utf8", timeout: 5000 });
   if (result.error) {
     return { status: null, stdout: result.stdout || "", stderr: result.stderr || "", error: result.error };
   }

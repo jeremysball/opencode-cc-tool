@@ -18,7 +18,11 @@ import { defaultRunCommand as defaultShellRunner, pluginInstalled } from "./setu
 // tests can stub it without spawning a subprocess.
 function checkClaudeIntegration(runShellCommand) {
   const probe = runShellCommand("claude", ["plugin", "list", "--json"]);
-  if (probe.error) return { installed: false, reason: "claude CLI not found" };
+  if (probe.error) {
+    return probe.error.code === "ENOENT"
+      ? { installed: false, reason: "claude CLI not found" }
+      : { installed: false, reason: `claude plugin list failed: ${probe.error.message}` };
+  }
   if (probe.status !== 0) return { installed: false, reason: "claude plugin list failed" };
   return { installed: pluginInstalled(probe.stdout || "") };
 }

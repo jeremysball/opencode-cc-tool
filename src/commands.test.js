@@ -379,3 +379,24 @@ test("doctor reports the claude plugin as not installed when the claude CLI is m
   assert.deepEqual(result.integrations, { claude: { installed: false, reason: "claude CLI not found" } });
   assert.equal(result.warnings.length, 1);
 });
+
+test("doctor reports a distinct reason when claude exits with a non-ENOENT spawn error", async () => {
+  const client = fakeClient();
+  client.request = async (method) => {
+    if (method === "system.health") return { healthy: true, pid: 1 };
+    throw new Error(`unexpected request: ${method}`);
+  };
+  const runShellCommand = () => ({
+    status: null,
+    stdout: "",
+    stderr: "",
+    error: { code: "EACCES", message: "spawnSync claude EACCES" },
+  });
+
+  const result = await runCommand("doctor", {}, { client, runShellCommand });
+
+  assert.deepEqual(result.integrations, {
+    claude: { installed: false, reason: "claude plugin list failed: spawnSync claude EACCES" },
+  });
+  assert.equal(result.warnings.length, 1);
+});
