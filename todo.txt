@@ -98,6 +98,47 @@ TIER DOCKER: BUNDLED INTO FUTURE DEPLOYMENT LAYER
              targets, daemon inheritance
 
 
+TIER OPEN NOTES: SMALL UNPLANNED ITEMS
+=======================================
+
+[_] done can mean incomplete
+    Status: unplanned
+    Details: a task can settle status: done, exitCode: 0 with an EMPTY final
+             message and a truncated deliverable. src/tasks.js:1097 only
+             distinguishes done/crashed by exit code + signal; nothing
+             cross-checks an empty message against a clean exit. Wanted: a
+             done_no_output status (or a flag on result), plus an optional
+             --require-final-marker <regex> on dispatch to enforce the
+             CLAUDE.md Status:-line report-format contract.
+    Plan: (none) — needs design
+
+[_] poll/list response trimming
+    Status: unplanned
+    Details: poll's response includes the id even though the caller already
+             supplied it; bundle with a broader "nothing changed, don't
+             repeat" pass across the API. Also: remove old/settled ids from
+             the list tool's output once they age out.
+    Plan: (none) — needs design
+
+[_] result message truncation
+    Status: unplanned
+    Details: `taskferry result` prints the whole final message inline; for a
+             long report that's a wall of text. `--fields message` exists,
+             but result could default to truncating with a pointer the way
+             narration already does.
+    Plan: (none) — needs design
+
+[_] wait --summarize model override
+    Status: unplanned
+    Details: --summarize on `wait` reads the model from
+             TASKFERRY_SUMMARY_MODEL only; no per-call --model/key-slot
+             override the way `dispatch` and `advisor` have.
+    Plan: (none) — needs design
+
+- prompting notes: don't use poll when status will do; encourage the model
+  to utilize the next: fields.
+
+
 TIER NOT DOING / DREAM
 =======================
 
