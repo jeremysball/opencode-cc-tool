@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createTaskManager } from "./tasks.js";
+import { createTaskManager, summaryAgentDeniedBash } from "./tasks.js";
 
 // Builds an isolated task manager backed by a temp state dir and, unless
 // overridden, fake spawnFn/killFn so no test ever touches a real `opencode`
@@ -1720,6 +1720,20 @@ describe("tail()", () => {
   });
 });
 
+describe("summaryAgentDeniedBash", () => {
+  test("recognizes opencode's real denial message on stderr", () => {
+    assert.equal(summaryAgentDeniedBash("", "Tool bash is disabled for agent taskferry-summary\n"), true);
+  });
+
+  test("recognizes a 'denied' message on stdout", () => {
+    assert.equal(summaryAgentDeniedBash("bash tool denied\n", ""), true);
+  });
+
+  test("is false when neither stream mentions disabled/denied (e.g. bash actually ran)", () => {
+    assert.equal(summaryAgentDeniedBash("ok\n", ""), false);
+  });
+});
+
 describe("summarize()", () => {
   test("uses an isolated tool-denied agent and private attachment", async () => {
     let captured;
@@ -1750,6 +1764,46 @@ describe("summarize()", () => {
 
     child.emit("exit", 0, null);
     assert.equal(fs.existsSync(attachment), false);
+  });
+
+  test("writes a previous_summary field into the snapshot attachment when previousActivity is given", async () => {
+    let capturedSnapshot;
+    const child = fakeChild();
+    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Investigated the issue" } });
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": log },
+      spawnFn: (command, args) => {
+        const attachment = args[args.indexOf("-f") + 1];
+        capturedSnapshot = JSON.parse(fs.readFileSync(attachment, "utf8"));
+        return child;
+      },
+    });
+
+    await mgr.summarize("source", { maxWords: 150, previousActivity: "Read the config file." });
+
+    assert.equal(capturedSnapshot.previous_summary, "Read the config file.");
+    child.emit("exit", 0, null);
+  });
+
+  test("omits previous_summary from the snapshot attachment when there is no prior activity", async () => {
+    let capturedSnapshot;
+    const child = fakeChild();
+    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Investigated the issue" } });
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": log },
+      spawnFn: (command, args) => {
+        const attachment = args[args.indexOf("-f") + 1];
+        capturedSnapshot = JSON.parse(fs.readFileSync(attachment, "utf8"));
+        return child;
+      },
+    });
+
+    await mgr.summarize("source", { maxWords: 150 });
+
+    assert.equal("previous_summary" in capturedSnapshot, false);
+    child.emit("exit", 0, null);
   });
 
   test("does not spend a model call when no text has been observed", async () => {
@@ -1786,6 +1840,52 @@ describe("summarize()", () => {
     await assert.rejects(mgr.summarize("source"), /summary agent isolation check failed/);
     assert.equal(spawned, false);
     assert.equal(mgr.list().tasks.length, 1);
+  });
+
+  // The default listModelsFn/verifySummaryAgentFn (used in production, bypassed
+  // by makeManager's forced overrides elsewhere in this file) both shell out to
+  // execFileAsync("opencode", ...). This test exercises those real defaults
+  // against a fake `opencode` on PATH that mimics the CLI's actual exit
+  // behavior -- exit 1 with a "disabled" stderr message when it denies a tool --
+  // so a regression reintroducing the always-throws bug (execFileAsync rejecting
+  // before the denial text is ever inspected) would fail this test even though
+  // every other summarize() test here injects verifySummaryAgentFn and never
+  // touches the real code path at all.
+  test("factory-default verifySummaryAgentFn recovers a real opencode-style tool denial from a rejected execFileAsync call", async (t) => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    const logDir = path.join(stateDir, "logs");
+    fs.mkdirSync(logDir, { recursive: true });
+    const logPath = path.join(logDir, "source.ndjson");
+    fs.writeFileSync(logPath, JSON.stringify({ type: "text", part: { messageID: "m1", text: "progress" } }));
+    fs.writeFileSync(
+      path.join(stateDir, "tasks.json"),
+      JSON.stringify([baseTask({ id: "source", logPath })], null, 2)
+    );
+
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-fake-opencode-"));
+    fs.writeFileSync(
+      path.join(binDir, "opencode"),
+      ['#!/bin/sh', 'if [ "$1" = "debug" ]; then', '  echo "Tool bash is disabled for agent taskferry-summary" 1>&2', '  exit 1', 'fi', 'echo "opencode/hy3-free"', ''].join("\n")
+    );
+    fs.chmodSync(path.join(binDir, "opencode"), 0o755);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${binDir}:${originalPath}`;
+    t.after(() => {
+      process.env.PATH = originalPath;
+      fs.rmSync(binDir, { recursive: true, force: true });
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    });
+
+    const child = fakeChild();
+    const mgr = createTaskManager({
+      stateDir,
+      spawnFn: () => child,
+      killFn: () => {},
+    });
+
+    const summary = await mgr.summarize("source", { maxWords: 150 });
+    assert.equal(summary.summaryTask.status, "running");
+    child.emit("exit", 0, null);
   });
 
   test("preserves head and tail narration around an oversized log omission marker", async () => {

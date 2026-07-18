@@ -55,6 +55,41 @@ test("watch prints each event through formatWatchEvent and resolves on abort", a
   assert.match(io.lines[0], /oc_1/);
 });
 
+test("watch collapses a multi-line activity event to exactly one written line", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const controller = new AbortController();
+  let deliver;
+  const client = fakeClient({
+    onSubscribe: (_params, onEvent) => {
+      deliver = onEvent;
+    },
+  });
+  const io = fakeIo();
+
+  const pending = runCommand("watch", { directory: root, format: "toon", summaries: true }, {
+    client,
+    io,
+    signal: controller.signal,
+    cwd: root,
+  });
+
+  deliver({
+    sequence: 1,
+    type: "task.activity",
+    taskId: "oc_1",
+    directory: root,
+    status: "running",
+    activity: "Inspecting the server\nchecking Playwright logs\nand env vars",
+  });
+  controller.abort();
+  await pending;
+
+  assert.equal(io.lines.length, 1);
+  assert.equal((io.lines[0].match(/\n/g) || []).length, 1);
+  assert.match(io.lines[0], /oc_1/);
+  assert.match(io.lines[0], /Inspecting the server checking Playwright logs and env vars/);
+});
+
 test("watch --task-id filters events to one task and exits on its terminal event", async () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
   let deliver;

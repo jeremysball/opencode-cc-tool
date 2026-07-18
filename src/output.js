@@ -161,12 +161,37 @@ export function homeView(value, { executablePath, workspace }) {
   };
 }
 
+function shortTime(occurredAt) {
+  const parsed = new Date(occurredAt);
+  return Number.isNaN(parsed.getTime()) ? "" : parsed.toLocaleTimeString("en-US", { hour12: false });
+}
+
+// A raw task.activity/task.state event carries protocol plumbing (sequence,
+// directory, outputWatermark, a previousStatus that's usually null) that's
+// noise to a human watching progress at a glance. Collapse each event to one
+// line: just the time, the task, and what actually changed.
+function formatActivityLine(event) {
+  const time = shortTime(event.occurredAt);
+  const prefix = time ? `${time} ` : "";
+  if (event.type === "task.state") {
+    const transition = event.previousStatus && event.previousStatus !== event.status
+      ? `${event.previousStatus} -> ${event.status}`
+      : event.status;
+    return `${prefix}${event.taskId} ${transition}`;
+  }
+  const activity = typeof event.activity === "string" && event.activity
+    ? event.activity.replace(/[\r\n]+/g, " ")
+    : event.status;
+  return `${prefix}${event.taskId} ${event.status}: ${activity}`;
+}
+
 export function formatWatchEvent(event, format) {
   if (format === "ndjson") return JSON.stringify(event);
   if (format === "claude-monitor") {
     const activity = typeof event.activity === "string" && event.activity ? event.activity : `Task ${event.status}`;
     return `Taskferry(${event.status} · ${event.taskId}): ${activity.replace(/[\r\n]+/g, " ")}`;
   }
+  if (event.type === "task.activity" || event.type === "task.state") return formatActivityLine(event);
   return encode(event);
 }
 
