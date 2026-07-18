@@ -1865,7 +1865,7 @@ describe("summarize()", () => {
     const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-fake-opencode-"));
     fs.writeFileSync(
       path.join(binDir, "opencode"),
-      ['#!/bin/sh', 'if [ "$1" = "debug" ]; then', '  echo "Tool bash is disabled for agent taskferry-summary" 1>&2', '  exit 1', 'fi', 'echo "opencode-go/deepseek-v4-flash"', ''].join("\n")
+      ['#!/bin/sh', 'if [ "$1" = "debug" ]; then', '  echo "Tool bash is disabled for agent taskferry-summary" 1>&2', '  exit 1', 'fi', 'echo "opencode/hy3-free"', ''].join("\n")
     );
     fs.chmodSync(path.join(binDir, "opencode"), 0o755);
     const originalPath = process.env.PATH;
