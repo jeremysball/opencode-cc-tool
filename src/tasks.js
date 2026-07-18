@@ -272,6 +272,31 @@ function errMessage(err) {
   return err instanceof Error ? err.message : String(err);
 }
 
+const TOOL_EVENT_TRUNCATE_CHARS = 500;
+
+/**
+ * @param {string} text
+ * @param {number} [max]
+ * @returns {string}
+ */
+function truncateForNarration(text, max = TOOL_EVENT_TRUNCATE_CHARS) {
+  return text.length > max ? `${text.slice(0, max)}…[truncated]` : text;
+}
+
+/**
+ * @param {{tool?: string, state?: {input?: unknown, output?: unknown}}} part
+ * @returns {string}
+ */
+function formatToolEventForNarration(part) {
+  const input = part.state?.input;
+  const inputText = typeof input === "string" ? input : JSON.stringify(input ?? {});
+  const output = part.state?.output;
+  const label = `[tool:${part.tool || "unknown"}]`;
+  const inputPart = truncateForNarration(inputText);
+  if (typeof output !== "string" || !output) return `${label} ${inputPart}`;
+  return `${label} ${inputPart} -> ${truncateForNarration(output)}`;
+}
+
 /**
  * @param {string|undefined} spec
  * @returns {Map<string, string>}
@@ -911,24 +936,31 @@ export function createTaskManager({
   function parseNarration(raw) {
     /** @type {Map<string, string[]>} */
     const textByMessageId = new Map();
-    /** @type {string[]} */
-    const textOrder = [];
+    /** @type {Array<{kind: "text", mid: string}|{kind: "tool", line: string}>} */
+    const order = [];
     for (const line of raw.split("\n")) {
       if (!line.trim()) continue;
+      /** @type {any} */
+      let evt;
       try {
-        const evt = JSON.parse(line);
-        if (evt.type !== "text" || typeof evt.part?.text !== "string") continue;
-        const mid = evt.part.messageID;
-        if (!textByMessageId.has(mid)) {
-          textByMessageId.set(mid, []);
-          textOrder.push(mid);
-        }
-        /** @type {string[]} */ (textByMessageId.get(mid)).push(evt.part.text);
+        evt = JSON.parse(line);
       } catch {
         continue;
       }
+      if (evt.type === "text" && typeof evt.part?.text === "string") {
+        const mid = evt.part.messageID;
+        if (!textByMessageId.has(mid)) {
+          textByMessageId.set(mid, []);
+          order.push({ kind: "text", mid });
+        }
+        /** @type {string[]} */ (textByMessageId.get(mid)).push(evt.part.text);
+      } else if (evt.type === "tool_use" && evt.part?.type === "tool") {
+        order.push({ kind: "tool", line: formatToolEventForNarration(evt.part) });
+      }
     }
-    return textOrder.map((mid) => /** @type {string[]} */ (textByMessageId.get(mid)).join("")).join("\n\n");
+    return order
+      .map((entry) => (entry.kind === "text" ? /** @type {string[]} */ (textByMessageId.get(entry.mid)).join("") : entry.line))
+      .join("\n\n");
   }
 
   /**

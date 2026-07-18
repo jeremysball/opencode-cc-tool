@@ -17,26 +17,47 @@ function decodeUtf8(buffer, side) {
   return text;
 }
 
+const TOOL_EVENT_TRUNCATE_CHARS = 500;
+
+/** @param {string} text @param {number} [max] @returns {string} */
+function truncateForNarration(text, max = TOOL_EVENT_TRUNCATE_CHARS) {
+  return text.length > max ? `${text.slice(0, max)}…[truncated]` : text;
+}
+
+/** @param {{tool?: string, state?: {input?: unknown, output?: unknown}}} part @returns {string} */
+function formatToolEventForNarration(part) {
+  const input = part.state?.input;
+  const inputText = typeof input === "string" ? input : JSON.stringify(input ?? {});
+  const output = part.state?.output;
+  const label = `[tool:${part.tool || "unknown"}]`;
+  const inputPart = truncateForNarration(inputText);
+  if (typeof output !== "string" || !output) return `${label} ${inputPart}`;
+  return `${label} ${inputPart} -> ${truncateForNarration(output)}`;
+}
+
 /** @param {string} raw @returns {string} */
 function narrationFromRaw(raw) {
   const textByMessageId = new Map();
-  const textOrder = [];
+  const order = [];
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     try {
       const event = JSON.parse(line);
-      if (event.type !== "text" || typeof event.part?.text !== "string") continue;
-      const messageId = event.part.messageID ?? "__unknown_message__";
-      if (!textByMessageId.has(messageId)) {
-        textByMessageId.set(messageId, []);
-        textOrder.push(messageId);
+      if (event.type === "text" && typeof event.part?.text === "string") {
+        const messageId = event.part.messageID ?? "__unknown_message__";
+        if (!textByMessageId.has(messageId)) {
+          textByMessageId.set(messageId, []);
+          order.push({ kind: "text", messageId });
+        }
+        textByMessageId.get(messageId).push(event.part.text);
+      } else if (event.type === "tool_use" && event.part?.type === "tool") {
+        order.push({ kind: "tool", line: formatToolEventForNarration(event.part) });
       }
-      textByMessageId.get(messageId).push(event.part.text);
     } catch {
       // Logs can contain stderr lines and partial NDJSON records.
     }
   }
-  return textOrder.map((messageId) => textByMessageId.get(messageId).join("")).join("\n\n");
+  return order.map((entry) => (entry.kind === "text" ? textByMessageId.get(entry.messageId).join("") : entry.line)).join("\n\n");
 }
 
 /** @param {string} text @param {number} maxChars @returns {string} */

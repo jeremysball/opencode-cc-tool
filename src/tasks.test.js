@@ -1806,6 +1806,35 @@ describe("summarize()", () => {
     child.emit("exit", 0, null);
   });
 
+  test("includes truncated tool call input/output alongside text in the narration snapshot", async () => {
+    let capturedSnapshot;
+    const child = fakeChild();
+    const log = [
+      JSON.stringify({ type: "text", part: { messageID: "m1", text: "Checking repo state" } }),
+      JSON.stringify({
+        type: "tool_use",
+        part: { type: "tool", tool: "bash", state: { status: "completed", input: { command: "git status" }, output: "x".repeat(600) } },
+      }),
+      JSON.stringify({ type: "text", part: { messageID: "m2", text: "Now editing the file" } }),
+    ].join("\n");
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": log },
+      spawnFn: (command, args) => {
+        const attachment = args[args.indexOf("-f") + 1];
+        capturedSnapshot = JSON.parse(fs.readFileSync(attachment, "utf8"));
+        return child;
+      },
+    });
+
+    await mgr.summarize("source", { maxWords: 150 });
+
+    assert.match(capturedSnapshot.narration, /Checking repo state/);
+    assert.match(capturedSnapshot.narration, /\[tool:bash] \{"command":"git status"} -> x+…\[truncated]/);
+    assert.match(capturedSnapshot.narration, /Now editing the file/);
+    child.emit("exit", 0, null);
+  });
+
   test("does not spend a model call when no text has been observed", async () => {
     let spawned = false;
     const mgr = makeManager({

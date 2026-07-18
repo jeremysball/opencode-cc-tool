@@ -33,6 +33,23 @@ describe("activity snapshots", () => {
     assert.equal(snapshot.outputWatermark, Buffer.byteLength(raw));
   });
 
+  test("includes truncated tool call input/output alongside text", () => {
+    const raw = [
+      JSON.stringify({ type: "text", part: { messageID: "m1", text: "Checking repo state" } }),
+      JSON.stringify({
+        type: "tool_use",
+        part: { type: "tool", tool: "bash", state: { status: "completed", input: { command: "git status" }, output: "x".repeat(600) } },
+      }),
+      JSON.stringify({ type: "text", part: { messageID: "m2", text: "Now editing the file" } }),
+    ].join("\n");
+
+    const snapshot = snapshotNarration(raw, { maxBytes: Buffer.byteLength(raw), maxChars: 4000 });
+
+    assert.match(snapshot.text, /Checking repo state/);
+    assert.match(snapshot.text, /\[tool:bash] \{"command":"git status"} -> x+…\[truncated]/);
+    assert.match(snapshot.text, /Now editing the file/);
+  });
+
   test("uses a sanitized dispatch prompt as local activity before model output exists", () => {
     assert.equal(
       buildLocalActivity({ status: "running", prompt: "Inspect\n\u001b[31mthe server\u001b[0m" }),
