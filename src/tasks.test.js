@@ -1842,6 +1842,52 @@ describe("summarize()", () => {
     assert.equal(mgr.list().tasks.length, 1);
   });
 
+  // The default listModelsFn/verifySummaryAgentFn (used in production, bypassed
+  // by makeManager's forced overrides elsewhere in this file) both shell out to
+  // execFileAsync("opencode", ...). This test exercises those real defaults
+  // against a fake `opencode` on PATH that mimics the CLI's actual exit
+  // behavior -- exit 1 with a "disabled" stderr message when it denies a tool --
+  // so a regression reintroducing the always-throws bug (execFileAsync rejecting
+  // before the denial text is ever inspected) would fail this test even though
+  // every other summarize() test here injects verifySummaryAgentFn and never
+  // touches the real code path at all.
+  test("factory-default verifySummaryAgentFn recovers a real opencode-style tool denial from a rejected execFileAsync call", async (t) => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
+    const logDir = path.join(stateDir, "logs");
+    fs.mkdirSync(logDir, { recursive: true });
+    const logPath = path.join(logDir, "source.ndjson");
+    fs.writeFileSync(logPath, JSON.stringify({ type: "text", part: { messageID: "m1", text: "progress" } }));
+    fs.writeFileSync(
+      path.join(stateDir, "tasks.json"),
+      JSON.stringify([baseTask({ id: "source", logPath })], null, 2)
+    );
+
+    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-fake-opencode-"));
+    fs.writeFileSync(
+      path.join(binDir, "opencode"),
+      ['#!/bin/sh', 'if [ "$1" = "debug" ]; then', '  echo "Tool bash is disabled for agent taskferry-summary" 1>&2', '  exit 1', 'fi', 'echo "opencode-go/deepseek-v4-flash"', ''].join("\n")
+    );
+    fs.chmodSync(path.join(binDir, "opencode"), 0o755);
+    const originalPath = process.env.PATH;
+    process.env.PATH = `${binDir}:${originalPath}`;
+    t.after(() => {
+      process.env.PATH = originalPath;
+      fs.rmSync(binDir, { recursive: true, force: true });
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    });
+
+    const child = fakeChild();
+    const mgr = createTaskManager({
+      stateDir,
+      spawnFn: () => child,
+      killFn: () => {},
+    });
+
+    const summary = await mgr.summarize("source", { maxWords: 150 });
+    assert.equal(summary.summaryTask.status, "running");
+    child.emit("exit", 0, null);
+  });
+
   test("preserves head and tail narration around an oversized log omission marker", async () => {
     const child = fakeChild();
     let attachment;
