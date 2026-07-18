@@ -308,7 +308,7 @@ function formatToolEventForNarration(part) {
  * @param {string|undefined} spec
  * @returns {Map<string, string>}
  */
-function parseKeySlots(spec) {
+export function parseKeySlots(spec) {
   const slots = new Map();
   if (!spec) return slots;
   for (const entry of spec.split(",")) {
