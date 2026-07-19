@@ -266,6 +266,194 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
   });
 });
 
+describe("output-completeness check at settlement time (issue #35)", () => {
+  function writeLog(logPath, lines) {
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    fs.writeFileSync(logPath, lines.map((line) => JSON.stringify(line)).join("\n"));
+  }
+
+  test("a clean done task with a final message is not flagged incomplete", () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    writeLog(dispatched.logPath, [
+      { type: "text", part: { messageID: "m1", text: "Final answer" } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    child.emit("exit", 0, null);
+    const settled = mgr.status(dispatched.id);
+    assert.equal(settled.status, "done");
+    assert.equal("incomplete" in settled, false);
+    assert.equal("finalMarker" in settled, false);
+    assert.equal(mgr.result(dispatched.id).message, "Final answer");
+  });
+
+  test("a clean done task with an empty final message is flagged incomplete", () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    writeLog(dispatched.logPath, [
+      { type: "text", part: { messageID: "m1", text: "" } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    child.emit("exit", 0, null);
+    const settled = mgr.status(dispatched.id);
+    assert.equal(settled.status, "done");
+    assert.equal(settled.incomplete, true);
+    const r = mgr.result(dispatched.id);
+    assert.equal(r.incomplete, true);
+    assert.match(r.next, /no usable final output/);
+  });
+
+  test("a clean done task with only whitespace in the final message is flagged incomplete", () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    writeLog(dispatched.logPath, [
+      { type: "text", part: { messageID: "m1", text: "   \n\t  " } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    child.emit("exit", 0, null);
+    assert.equal(mgr.status(dispatched.id).incomplete, true);
+  });
+
+  test("--require-final-marker with a matching message leaves the task as a normal done", () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({
+      prompt: "hi",
+      directory: os.tmpdir(),
+      finalMarker: "^Status: DONE$",
+    });
+    writeLog(dispatched.logPath, [
+      { type: "text", part: { messageID: "m1", text: "Status: DONE" } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    child.emit("exit", 0, null);
+    const settled = mgr.status(dispatched.id);
+    assert.equal(settled.status, "done");
+    assert.equal("incomplete" in settled, false);
+    assert.equal(settled.finalMarker, "^Status: DONE$");
+    const r = mgr.result(dispatched.id, { fields: ["message", "incomplete", "finalMarker"] });
+    assert.equal(r.incomplete, null);
+    assert.equal(r.finalMarker, "^Status: DONE$");
+    assert.equal(r.message, "Status: DONE");
+  });
+
+  test("--require-final-marker with a non-matching message flags the task incomplete", () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({
+      prompt: "hi",
+      directory: os.tmpdir(),
+      finalMarker: "^Status: DONE$",
+    });
+    writeLog(dispatched.logPath, [
+      { type: "text", part: { messageID: "m1", text: "I forgot to follow the contract" } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    child.emit("exit", 0, null);
+    const settled = mgr.status(dispatched.id);
+    assert.equal(settled.status, "done");
+    assert.equal(settled.incomplete, true);
+    assert.equal(settled.finalMarker, "^Status: DONE$");
+    const r = mgr.result(dispatched.id);
+    assert.equal(r.incomplete, true);
+    assert.match(r.next, /--require-final-marker "\^Status: DONE\$" did not match/);
+  });
+
+  test("--require-final-marker combined with an empty message is flagged for both reasons", () => {
+    const child = fakeChild();
+    const mgr = makeManager({ spawnFn: () => child });
+    const dispatched = mgr.dispatch({
+      prompt: "hi",
+      directory: os.tmpdir(),
+      finalMarker: "^Status: DONE$",
+    });
+    writeLog(dispatched.logPath, [
+      { type: "text", part: { messageID: "m1", text: "" } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    child.emit("exit", 0, null);
+    assert.equal(mgr.status(dispatched.id).incomplete, true);
+  });
+
+  test("crashed and cancelled tasks are not relabeled as incomplete", () => {
+    const crashChild = fakeChild();
+    const crashMgr = makeManager({ spawnFn: () => crashChild });
+    const crashTask = crashMgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    writeLog(crashTask.logPath, [
+      { type: "text", part: { messageID: "m1", text: "" } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    crashChild.emit("exit", 1, null);
+    assert.equal(crashMgr.status(crashTask.id).status, "crashed");
+    assert.equal("incomplete" in crashMgr.status(crashTask.id), false);
+
+    const cancelChild = fakeChild();
+    const cancelMgr = makeManager({ spawnFn: () => cancelChild, killFn: () => {} });
+    const cancelTask = cancelMgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    cancelMgr.cancel(cancelTask.id);
+    writeLog(cancelTask.logPath, [
+      { type: "text", part: { messageID: "m1", text: "" } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    cancelChild.emit("exit", null, "SIGTERM");
+    assert.equal(cancelMgr.status(cancelTask.id).status, "cancelled");
+    assert.equal("incomplete" in cancelMgr.status(cancelTask.id), false);
+  });
+
+  test("dispatch rejects an invalid regex source up front (before queueing)", () => {
+    const mgr = makeManager({ spawnFn: () => fakeChild() });
+    assert.throws(
+      () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), finalMarker: "(unclosed" }),
+      (error) => {
+        assert.match(error.message, /--require-final-marker is not a valid RegExp/);
+        return true;
+      }
+    );
+  });
+
+  test("incomplete and finalMarker survive a daemon restart via tasks.json", () => {
+    const child = fakeChild();
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-restart-"));
+    const logDir = path.join(stateDir, "logs");
+    fs.mkdirSync(logDir, { recursive: true });
+
+    const mgr1 = createTaskManager({
+      stateDir,
+      spawnFn: () => child,
+      killFn: () => {},
+      listModelsFn: () => "opencode/hy3-free\n",
+      verifySummaryAgentFn: async () => {},
+    });
+    const dispatched = mgr1.dispatch({
+      prompt: "hi",
+      directory: os.tmpdir(),
+      finalMarker: "^Status: DONE$",
+    });
+    const logPath = dispatched.logPath;
+    writeLog(logPath, [
+      { type: "text", part: { messageID: "m1", text: "no marker here" } },
+      { type: "step_finish", part: { messageID: "m1", reason: "stop" } },
+    ]);
+    child.emit("exit", 0, null);
+    assert.equal(mgr1.status(dispatched.id).incomplete, true);
+
+    const mgr2 = createTaskManager({
+      stateDir,
+      spawnFn: () => { throw new Error("not used"); },
+      killFn: () => {},
+      listModelsFn: () => "opencode/hy3-free\n",
+      verifySummaryAgentFn: async () => {},
+    });
+    const reloaded = mgr2.status(dispatched.id);
+    assert.equal(reloaded.status, "done");
+    assert.equal(reloaded.incomplete, true);
+    assert.equal(reloaded.finalMarker, "^Status: DONE$");
+  });
+});
+
 describe("dispatch queue", () => {
   test("launches at most two tasks per window and starts queued tasks FIFO", async () => {
     const children = [];
@@ -424,6 +612,55 @@ describe("active-task concurrency cap (regressions)", () => {
     const second = mgr.dispatch({ prompt: "second", directory: os.tmpdir() });
     assert.equal(second.status, "running");
     assert.equal(children.length, 2);
+  });
+});
+
+describe("config file precedence (maxConcurrentTasks)", () => {
+  function managerWithLimit(t, { env, config }) {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-cfg-precedence-"));
+    const children = [];
+    const originalEnv = process.env.TASKFERRY_MAX_CONCURRENT_TASKS;
+    if (env === undefined) delete process.env.TASKFERRY_MAX_CONCURRENT_TASKS;
+    else process.env.TASKFERRY_MAX_CONCURRENT_TASKS = env;
+    t.after(() => {
+      if (originalEnv === undefined) delete process.env.TASKFERRY_MAX_CONCURRENT_TASKS;
+      else process.env.TASKFERRY_MAX_CONCURRENT_TASKS = originalEnv;
+    });
+    const manager = createTaskManager({
+      stateDir,
+      spawnFn: () => {
+        const child = fakeChild();
+        children.push(child);
+        return child;
+      },
+      killFn: () => {},
+      config,
+    });
+    t.after(() => {
+      for (const child of children) child.emit("exit", null, "SIGTERM");
+    });
+    return manager;
+  }
+
+  test("env var wins over config when both are set", (t) => {
+    const mgr = managerWithLimit(t, { env: "1", config: { maxConcurrentTasks: 5 } });
+    mgr.dispatch({ prompt: "a", directory: process.cwd(), model: "m" });
+    const second = mgr.dispatch({ prompt: "b", directory: process.cwd(), model: "m" });
+    assert.equal(mgr.status(second.id).status, "queued");
+  });
+
+  test("config value used when env var is unset", (t) => {
+    const mgr = managerWithLimit(t, { env: undefined, config: { maxConcurrentTasks: 1 } });
+    mgr.dispatch({ prompt: "a", directory: process.cwd(), model: "m" });
+    const second = mgr.dispatch({ prompt: "b", directory: process.cwd(), model: "m" });
+    assert.equal(mgr.status(second.id).status, "queued");
+  });
+
+  test("built-in default used when both env and config are unset", (t) => {
+    const mgr = managerWithLimit(t, { env: undefined, config: {} });
+    for (let i = 0; i < 4; i++) mgr.dispatch({ prompt: `p${i}`, directory: process.cwd(), model: "m" });
+    const fifth = mgr.dispatch({ prompt: "p5", directory: process.cwd(), model: "m" });
+    assert.equal(mgr.status(fifth.id).status, "queued");
   });
 });
 
@@ -1806,6 +2043,35 @@ describe("summarize()", () => {
     child.emit("exit", 0, null);
   });
 
+  test("includes truncated tool call input/output alongside text in the narration snapshot", async () => {
+    let capturedSnapshot;
+    const child = fakeChild();
+    const log = [
+      JSON.stringify({ type: "text", part: { messageID: "m1", text: "Checking repo state" } }),
+      JSON.stringify({
+        type: "tool_use",
+        part: { type: "tool", tool: "bash", state: { status: "completed", input: { command: "git status" }, output: "x".repeat(600) } },
+      }),
+      JSON.stringify({ type: "text", part: { messageID: "m2", text: "Now editing the file" } }),
+    ].join("\n");
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": log },
+      spawnFn: (command, args) => {
+        const attachment = args[args.indexOf("-f") + 1];
+        capturedSnapshot = JSON.parse(fs.readFileSync(attachment, "utf8"));
+        return child;
+      },
+    });
+
+    await mgr.summarize("source", { maxWords: 150 });
+
+    assert.match(capturedSnapshot.narration, /Checking repo state/);
+    assert.match(capturedSnapshot.narration, /\[tool:bash] \{"command":"git status"} -> x+…\[truncated]/);
+    assert.match(capturedSnapshot.narration, /Now editing the file/);
+    child.emit("exit", 0, null);
+  });
+
   test("does not spend a model call when no text has been observed", async () => {
     let spawned = false;
     const mgr = makeManager({
@@ -1913,6 +2179,225 @@ describe("summarize()", () => {
     assert.match(snapshot.narration, /TAIL_MARKER/);
     assert.match(snapshot.narration, /bytes omitted from source log/);
     child.emit("exit", 0, null);
+  });
+
+  // Drives a single spawned summary child through its lifecycle (write a
+  // sessionID into its log so readSessionIdFromLog returns it, then fire the
+  // exit event). The default fakeChild never logs anything, so without this
+  // step the cache wouldn't get a session id to persist for the next call.
+  // Returns the summary task id (looked up by summaryOf.sourceTaskId) and the
+  // fakeChild handle so the caller can keep emitting further exits.
+  async function settleSummaryChildWithSessionId(mgr, summaryTaskId, sessionId, finalText = "current state") {
+    const persisted = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
+    const summary = persisted.find((task) => task.id === summaryTaskId);
+    if (!summary) throw new Error(`no summary task ${summaryTaskId} persisted`);
+    fs.writeFileSync(
+      summary.logPath,
+      [
+        JSON.stringify({ sessionID: sessionId, type: "step_start" }),
+        JSON.stringify({ type: "text", part: { messageID: "answer", text: finalText } }),
+        JSON.stringify({ type: "step_finish", part: { messageID: "answer", reason: "stop" } }),
+      ].join("\n")
+    );
+  }
+
+  test("first summarize call spawns with no --continue/--session flags and writes the full bounded excerpt", async () => {
+    let firstArgs;
+    let firstSnapshot;
+    const child = fakeChild();
+    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Inspect the daemon" } });
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": log },
+      spawnFn: (_command, args) => {
+        firstArgs = args;
+        firstSnapshot = JSON.parse(fs.readFileSync(args[args.indexOf("-f") + 1], "utf8"));
+        return child;
+      },
+    });
+
+    const started = await mgr.summarize("source", { maxWords: 150 });
+    assert.ok(started.summaryTask);
+
+    assert.equal(firstArgs.includes("--continue"), false);
+    assert.equal(firstArgs.includes("--session"), false);
+    assert.match(firstSnapshot.narration, /Inspect the daemon/);
+    assert.equal(firstSnapshot.narration_is_delta, undefined);
+
+    await settleSummaryChildWithSessionId(mgr, started.summaryTask.id, "ses_first");
+    child.emit("exit", 0, null);
+  });
+
+  test("second summarize call continues the prior session and sends only the narration delta (not the full bounded excerpt)", async () => {
+    const children = [];
+    const captures = [];
+    const initialLog = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Reading the config" } });
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": initialLog },
+      spawnFn: (_command, args) => {
+        const child = fakeChild(5000 + children.length);
+        children.push(child);
+        captures.push({ args, attachment: args[args.indexOf("-f") + 1] });
+        return child;
+      },
+    });
+
+    // First call: no continuation flags, snapshot uses the full bounded excerpt.
+    const firstStarted = await mgr.summarize("source", { maxWords: 150 });
+    const firstSnapshot = JSON.parse(fs.readFileSync(captures[0].attachment, "utf8"));
+    assert.equal(captures[0].args.includes("--continue"), false);
+    assert.equal(captures[0].args.includes("--session"), false);
+    assert.match(firstSnapshot.narration, /Reading the config/);
+
+    // Simulate the first summary task settling and handing its session id
+    // back via the cache's setSummarySessionId path (startTask's exit handler
+    // does this in production).
+    await settleSummaryChildWithSessionId(mgr, firstStarted.summaryTask.id, "ses_first");
+    children[0].emit("exit", 0, null);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Grow the source log; the second turn must see only the appended bytes.
+    fs.appendFileSync(firstStarted.sourceTaskId && path.join(mgr.paths.LOG_DIR, `${firstStarted.sourceTaskId}.ndjson`), "");
+
+    // Read the source task's persisted logPath and append new content so the
+    // next summarize call sees a real delta.
+    const persistedTasks = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
+    const source = persistedTasks.find((t) => t.id === "source");
+    fs.appendFileSync(source.logPath, JSON.stringify({ type: "text", part: { messageID: "m2", text: "New step completed" } }) + "\n");
+
+    // Second call: must continue the prior session, send only the delta, and
+    // include the previous summary so the model can stitch them together.
+    const secondStarted = await mgr.summarize("source", { maxWords: 150, previousActivity: "Read the config." });
+    const secondArgs = captures[1].args;
+    const secondSnapshot = JSON.parse(fs.readFileSync(captures[1].attachment, "utf8"));
+
+    assert.ok(secondStarted.summaryTask);
+    assert.equal(secondArgs.includes("--continue"), true);
+    assert.ok(secondArgs.includes("--session"));
+    const sessionIdx = secondArgs.indexOf("--session");
+    assert.equal(secondArgs[sessionIdx + 1], "ses_first");
+    // Delta-only: includes the newly appended narration, omits the old prefix.
+    assert.match(secondSnapshot.narration, /New step completed/);
+    assert.equal(secondSnapshot.narration.includes("Reading the config"), false);
+    assert.equal(secondSnapshot.narration_is_delta, true);
+    assert.equal(secondSnapshot.previous_summary, "Read the config.");
+
+    // Clean up the spawned summary children.
+    await settleSummaryChildWithSessionId(mgr, secondStarted.summaryTask.id, "ses_second", "delta-only result");
+    children[1].emit("exit", 0, null);
+  });
+
+  test("continue-fails-so-fresh: summarizeActivity detects a session-id mismatch and retries fresh, leaving the cache clear of the stale id", async () => {
+    const captures = [];
+    const children = [];
+    const initialLog = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Reading the config" } }) + "\n";
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": initialLog },
+      spawnFn: (_command, args) => {
+        captures.push({ args, attachment: args[args.indexOf("-f") + 1] });
+        const child = fakeChild(7000 + captures.length);
+        children.push(child);
+        return child;
+      },
+    });
+
+    // Seed the cache the same way startTask's exit handler would after a
+    // prior successful summarize call: it stores the spawn's opencode
+    // session id and the source-log watermark at summarize time. The watermark
+    // is the byte size of the source log right now, so summarizeTask's
+    // rotation check (`watermark > currentSize`) won't kick in and discard it.
+    const sourceLogPath = path.join(fs.realpathSync(mgr.paths.LOG_DIR), "source.ndjson");
+    const initialSize = fs.statSync(sourceLogPath).size;
+    mgr.activityCache.setSummarySessionId("source", "ses_cached");
+    mgr.activityCache.setLastSummarizedWatermark("source", initialSize);
+
+    // Grow the source log so a delta exists for the next turn.
+    const sourceTaskPersisted = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8")).find((t) => t.id === "source");
+    const appendedLine = JSON.stringify({ type: "text", part: { messageID: "m2", text: "More work done" } }) + "\n";
+    fs.appendFileSync(sourceTaskPersisted.logPath, appendedLine);
+
+    // Kick off the activity path: summarizeActivity will spawn #1 with
+    // --continue --session ses_cached, poll #1, see that the spawned child's
+    // log carries no matching session id, and spawn #2 fresh.
+    const refreshP = mgr.activityCache.refresh(
+      { id: "source", status: "running", logPath: sourceTaskPersisted.logPath },
+      { force: true, includeSummary: true }
+    );
+
+    // Wait for spawn #1 to land (synchronous inside summarizeTask).
+    while (captures.length < 1) await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(captures[0].args.includes("--continue"));
+    assert.ok(captures[0].args.includes("--session"));
+    assert.equal(captures[0].args[captures[0].args.indexOf("--session") + 1], "ses_cached");
+    // Spawn #1's snapshot is a delta (we have a prior watermark and growth).
+    const firstSnapshot = JSON.parse(fs.readFileSync(captures[0].attachment, "utf8"));
+    assert.equal(firstSnapshot.narration_is_delta, true);
+
+    // Drive spawn #1's exit. The fakeChild's log is empty so its derived
+    // session id is null -- which doesn't match ses_cached, triggering the
+    // fallback path.
+    children[0].emit("exit", 0, null);
+    while (captures.length < 2) await new Promise((resolve) => setImmediate(resolve));
+
+    // Spawn #2 is the fresh retry: no --continue, no --session, full bounded excerpt.
+    const retryArgs = captures[1].args;
+    assert.equal(retryArgs.includes("--continue"), false);
+    assert.equal(retryArgs.includes("--session"), false);
+    const retrySnapshot = JSON.parse(fs.readFileSync(captures[1].attachment, "utf8"));
+    assert.equal(retrySnapshot.narration_is_delta, undefined);
+    assert.match(retrySnapshot.narration, /Reading the config/);
+    assert.match(retrySnapshot.narration, /More work done/);
+
+    // Drop a usable final message + sessionID into the retry's log so the
+    // activity-result we get back isn't summaryFailed. The retry's session
+    // id is what survives into the cache for the next call.
+    const persisted = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
+    const retries = persisted.filter((t) => t.summaryOf && t.summaryOf.sourceTaskId === "source");
+    assert.equal(retries.length, 2, "expected two summary tasks to have been queued");
+    fs.writeFileSync(
+      retries[1].logPath,
+      JSON.stringify({ sessionID: "ses_fresh_retry", type: "text", part: { messageID: "answer", text: "fresh retry output" } }) + "\n"
+        + JSON.stringify({ type: "step_finish", part: { messageID: "answer", reason: "stop" } }) + "\n"
+    );
+    children[1].emit("exit", 0, null);
+
+    const result = await refreshP;
+    assert.equal(result.summaryFailed, false);
+    assert.equal(result.activity, "fresh retry output");
+    // Cache ended up with the retry's session id (recorded by the exit
+    // handler), not the stale ses_cached or the mismatched first attempt.
+    assert.equal(mgr.activityCache.getSummarySessionId("source"), "ses_fresh_retry");
+    assert.notEqual(mgr.activityCache.getLastSummarizedWatermark("source"), initialSize);
+  });
+
+  test("summarizeTask's exit handler persists the opencode session id and the source-log watermark to the activity cache for the next turn", async () => {
+    const child = fakeChild();
+    const initialLog = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Investigating issue" } }) + "\n";
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": initialLog },
+      spawnFn: () => child,
+    });
+
+    const started = await mgr.summarize("source", { maxWords: 150 });
+    // Pre-settlement: cache has nothing for this task.
+    assert.equal(mgr.list().tasks.length, 2);
+
+    await settleSummaryChildWithSessionId(mgr, started.summaryTask.id, "ses_real");
+    child.emit("exit", 0, null);
+    // Allow the exit handler's microtasks (persist, activity update, etc.) to drain.
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Exit handler should have stamped the summary task with the spawned
+    // opencode session id read from its log, and persisted status=done to
+    // tasks.json. The activity-cache side effects (next-turn --session lookup)
+    // are exercised end-to-end by the second-call test above.
+    const persisted = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
+    const summary = persisted.find((task) => task.id === started.summaryTask.id);
+    assert.equal(summary.status, "done");
+    assert.equal(summary.sessionId, "ses_real");
   });
 });
 

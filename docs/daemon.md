@@ -106,10 +106,15 @@ CLI usage approaches.
 
 ## Watchdogs
 
-- `TASKFERRY_NO_OUTPUT_TIMEOUT_MS` (default `120000`): a running task that
+- `TASKFERRY_NO_OUTPUT_TIMEOUT_MS` (default `256000`): a running task that
   writes no parseable log event before this deadline is stopped (`SIGTERM`,
   escalating to `SIGKILL`) and marked `crashed` with `failureReason:
   "no_output_timeout"`.
+- `TASKFERRY_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS` (default `400000`): once a
+  task has produced at least one parseable log event, the deadline for
+  further silence switches to this longer value for the rest of the task's
+  life — a model that's gone quiet mid-turn (long reasoning, a slow test
+  run) gets more room than a task that never started at all.
 - `TASKFERRY_WATCHDOG_POLL_MS` (default `2000`): how often the no-output and
   provider-failure checks run against a running task's log.
 - A task stopped because its log matched a known provider-failure
@@ -137,6 +142,28 @@ process-group leader), escalating to `SIGKILL` after `--grace-ms` (default
 5000) if it hasn't exited. Signaling the group, not just the `opencode`
 pid, reaches subprocesses it's mid-way through running (a long bash
 command), not just the top-level process.
+
+## Self-restart on source change
+
+The daemon records the newest mtime across the `.js` files in its own source
+directory at startup. After serving each request, it recomputes that value;
+if it has moved forward (a merge or `git pull` landed while the daemon was
+running), a restart is marked pending.
+
+The restart itself is deferred until idle: it only fires once
+`manager.list().counts` shows zero `running` and zero `queued` tasks, checked
+again on every subsequent request until that's true. This avoids reattaching
+to an in-flight `opencode` child process — deliberately out of scope, per
+[Recovery](#recovery) below — by never tearing the daemon down while one
+exists. When the idle check passes, the daemon closes its socket and server,
+spawns a fresh `daemon.js` process with the same environment, and exits; the
+replacement binds a new socket the same way any auto-started daemon does.
+
+Existing `watch` subscribers are dropped when the old process exits, same as
+any other daemon restart; a client reconnects and resubscribes on its next
+call. There is no special handoff for in-progress requests beyond the
+existing "wait for idle" gate — by the time the restart fires, none are
+in flight against `manager.list()`'s running/queued counts.
 
 ## Recovery
 

@@ -82,7 +82,7 @@ the next command spawn a fresh one.
 ## A task is stuck `crashed` with `failureReason: "no_output_timeout"`
 
 The task produced no parseable log event within
-`TASKFERRY_NO_OUTPUT_TIMEOUT_MS` (default 120000ms) and the watchdog killed
+`TASKFERRY_NO_OUTPUT_TIMEOUT_MS` (default 256000ms) and the watchdog killed
 it. Read the log directly (`taskferry status <id> --full` for the
 `logPath`) to see what, if anything, `opencode` wrote before being killed —
 a common cause is a prompt or model that needs an interactive step

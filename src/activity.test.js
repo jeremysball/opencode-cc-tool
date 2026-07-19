@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createActivityCache, buildLocalActivity, snapshotNarration, activityCacheKey } from "./activity.js";
+import { createActivityCache, buildLocalActivity, snapshotNarration, activityCacheKey, readDeltaNarration } from "./activity.js";
 import { runCli } from "./cli.js";
 import { parseRequestLine } from "./protocol.js";
 import { createTaskManager } from "./tasks.js";
@@ -33,11 +33,57 @@ describe("activity snapshots", () => {
     assert.equal(snapshot.outputWatermark, Buffer.byteLength(raw));
   });
 
+  test("includes truncated tool call input/output alongside text", () => {
+    const raw = [
+      JSON.stringify({ type: "text", part: { messageID: "m1", text: "Checking repo state" } }),
+      JSON.stringify({
+        type: "tool_use",
+        part: { type: "tool", tool: "bash", state: { status: "completed", input: { command: "git status" }, output: "x".repeat(600) } },
+      }),
+      JSON.stringify({ type: "text", part: { messageID: "m2", text: "Now editing the file" } }),
+    ].join("\n");
+
+    const snapshot = snapshotNarration(raw, { maxBytes: Buffer.byteLength(raw), maxChars: 4000 });
+
+    assert.match(snapshot.text, /Checking repo state/);
+    assert.match(snapshot.text, /\[tool:bash] \{"command":"git status"} -> x+…\[truncated]/);
+    assert.match(snapshot.text, /Now editing the file/);
+  });
+
   test("uses a sanitized dispatch prompt as local activity before model output exists", () => {
     assert.equal(
       buildLocalActivity({ status: "running", prompt: "Inspect\n\u001b[31mthe server\u001b[0m" }),
       "Inspect the server"
     );
+  });
+
+  test("readDeltaNarration returns only the narration appended since fromOffset", async (t) => {
+    const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-delta-snap-"));
+    t.after(() => fs.rmSync(logDir, { recursive: true, force: true }));
+    const logPath = path.join(logDir, "log.ndjson");
+    const first = JSON.stringify({ type: "text", part: { messageID: "first", text: "Earlier narration" } });
+    fs.writeFileSync(logPath, `${first}\n`);
+    const firstSize = Buffer.byteLength(`${first}\n`);
+    const snapshotBefore = readDeltaNarration(logPath, 0);
+    assert.match(snapshotBefore.narration, /Earlier narration/);
+    assert.equal(snapshotBefore.outputWatermark, firstSize);
+    assert.equal(snapshotBefore.sourceLogBytes, firstSize);
+
+    const appended = JSON.stringify({ type: "text", part: { messageID: "second", text: "Later narration only" } });
+    fs.appendFileSync(logPath, `${appended}\n`);
+    const finalSize = Buffer.byteLength(`${first}\n${appended}\n`);
+
+    const deltaOnly = readDeltaNarration(logPath, firstSize);
+    assert.equal(deltaOnly.narration.includes("Earlier narration"), false);
+    assert.match(deltaOnly.narration, /Later narration only/);
+    assert.equal(deltaOnly.outputWatermark, finalSize);
+    assert.equal(deltaOnly.sourceLogBytes, finalSize);
+    assert.equal(deltaOnly.inputBytes, Buffer.byteLength(`${appended}\n`));
+
+    const noNewBytes = readDeltaNarration(logPath, finalSize);
+    assert.equal(noNewBytes.narration, "");
+    assert.equal(noNewBytes.outputWatermark, finalSize);
+    assert.equal(noNewBytes.inputBytes, 0);
   });
 });
 
@@ -52,7 +98,7 @@ describe("task activity events", () => {
       spawnFn: () => child,
       killFn: () => {},
       activitySummariesEnabled: false,
-      activityMinIntervalMs: 0,
+      summarizerTimeoutMs: 0,
       onEvent: (event) => events.push(event),
     });
 
@@ -84,7 +130,7 @@ describe("task activity events", () => {
       spawnFn: () => child,
       killFn: () => {},
       activitySummariesEnabled: false,
-      activityMinIntervalMs: 0,
+      summarizerTimeoutMs: 0,
       noOutputTimeoutMs: 500,
       watchdogPollMs: 5,
       onEvent: (event) => events.push(event),
@@ -117,7 +163,7 @@ describe("task activity events", () => {
       },
       killFn: () => {},
       activitySummariesEnabled: true,
-      activityMinIntervalMs: 0,
+      summarizerTimeoutMs: 0,
       onEvent: (event) => events.push(event),
       listModelsFn: () => "opencode/hy3-free\n",
       verifySummaryAgentFn: async () => {},
@@ -156,12 +202,12 @@ describe("activity summary cache", () => {
     let calls = 0;
     const cache = createActivityCache({
       summariesEnabled: true,
-      minIntervalMs: 0,
+      summarizerTimeoutMs: 0,
       snapshot: () => ({ text: "Checking the daemon", outputWatermark: 10 }),
       summarize: async () => {
         calls++;
         await new Promise((resolve) => setTimeout(resolve, 5));
-        return "Checking the daemon configuration";
+        return { text: "Checking the daemon configuration", sessionId: null };
       },
     });
 
@@ -179,11 +225,11 @@ describe("activity summary cache", () => {
     let calls = 0;
     const cache = createActivityCache({
       summariesEnabled: true,
-      minIntervalMs: 0,
+      summarizerTimeoutMs: 0,
       snapshot: () => ({ text: "same output", outputWatermark: 20 }),
       summarize: async () => {
         calls++;
-        return "same summary";
+        return { text: "same summary", sessionId: null };
       },
     });
 
@@ -197,7 +243,7 @@ describe("activity summary cache", () => {
   test("falls back to sanitized local activity when the secondary model fails", async () => {
     const cache = createActivityCache({
       summariesEnabled: true,
-      minIntervalMs: 0,
+      summarizerTimeoutMs: 0,
       snapshot: () => ({ text: "Ran\n\u001b[2mtests\u001b[0m", outputWatermark: 30 }),
       summarize: async () => { throw new Error("provider unavailable"); },
     });
@@ -214,11 +260,11 @@ describe("activity summary cache", () => {
     let watermark = 10;
     const cache = createActivityCache({
       summariesEnabled: true,
-      minIntervalMs: 0,
+      summarizerTimeoutMs: 0,
       snapshot: () => ({ text: "growing narration", outputWatermark: watermark }),
       summarize: async ({ previousActivity }) => {
         seenPreviousActivity.push(previousActivity);
-        return `summary at watermark ${watermark}`;
+        return { text: `summary at watermark ${watermark}`, sessionId: null };
       },
     });
 
@@ -236,7 +282,7 @@ describe("activity summary cache", () => {
     const cache = createActivityCache({
       summariesEnabled: false,
       snapshot: () => ({ text: "local\nactivity", outputWatermark: 40 }),
-      summarize: async () => { calls++; return "must not be used"; },
+      summarize: async () => { calls++; return { text: "must not be used", sessionId: null }; },
     });
 
     const result = await cache.refresh(task, { force: true });
@@ -244,6 +290,124 @@ describe("activity summary cache", () => {
     assert.equal(calls, 0);
     assert.equal(result.activity, "local activity");
     assert.equal(result.summaryFailed, false);
+  });
+
+  test("first summarize call has no prior summary session id or watermark; subsequent calls carry both through", async () => {
+    const seenInputs = [];
+    let watermark = 100;
+    const cache = createActivityCache({
+      summariesEnabled: true,
+      summarizerTimeoutMs: 0,
+      snapshot: () => ({ text: "narration", outputWatermark: watermark }),
+      summarize: async ({ previousSessionId, lastSummarizedWatermark }) => {
+        seenInputs.push({ previousSessionId, lastSummarizedWatermark });
+        return { text: "summary", sessionId: watermark === 100 ? null : "ses_existing" };
+      },
+    });
+
+    // First call: nothing on file, the summarize callback sees the empty-state
+    // defaults (null session id and 0 watermark) so the spawner launches fresh.
+    await cache.refresh(task, { force: true });
+
+    // Simulate the spawned summary child settling and the daemon handing its
+    // opencode session id back to the cache (normally that path lives in
+    // startTask's exit handler in tasks.js -- here we exercise just the
+    // cache's storage half).
+    cache.setSummarySessionId(task.id, "ses_first");
+    cache.setLastSummarizedWatermark(task.id, 100);
+
+    watermark = 250;
+    await cache.refresh(task, { force: true });
+    cache.setSummarySessionId(task.id, "ses_second");
+    cache.setLastSummarizedWatermark(task.id, 250);
+
+    watermark = 500;
+    await cache.refresh(task, { force: true });
+
+    assert.deepEqual(seenInputs, [
+      { previousSessionId: null, lastSummarizedWatermark: 0 },
+      { previousSessionId: "ses_first", lastSummarizedWatermark: 100 },
+      { previousSessionId: "ses_second", lastSummarizedWatermark: 250 },
+    ]);
+  });
+
+  test("stores the opencode session id returned from summarize so the next turn can resume the same conversation", async () => {
+    const cache = createActivityCache({
+      summariesEnabled: true,
+      summarizerTimeoutMs: 0,
+      snapshot: () => ({ text: "snap", outputWatermark: 10 }),
+      summarize: async () => ({ text: "summary text", sessionId: "ses_abc" }),
+    });
+
+    await cache.refresh(task, { force: true });
+
+    assert.equal(cache.getSummarySessionId(task.id), "ses_abc");
+    assert.equal(cache.getLastSummarizedWatermark(task.id), 10);
+  });
+
+  test("does not store a session id or watermark when summarize returns empty text", async () => {
+    const cache = createActivityCache({
+      summariesEnabled: true,
+      summarizerTimeoutMs: 0,
+      snapshot: () => ({ text: "snap", outputWatermark: 10 }),
+      summarize: async () => ({ text: "   \n\t  ", sessionId: "ses_should_not_persist" }),
+    });
+
+    const result = await cache.refresh(task, { force: true });
+
+    assert.equal(result.summaryFailed, true);
+    assert.equal(cache.getSummarySessionId(task.id), null);
+    assert.equal(cache.getLastSummarizedWatermark(task.id), 0);
+  });
+
+  test("clears the stored session id and watermark after a thrown summarize failure so the next call retries fresh", async () => {
+    let shouldThrow = true;
+    let watermark = 10;
+    const cache = createActivityCache({
+      summariesEnabled: true,
+      summarizerTimeoutMs: 0,
+      snapshot: () => ({ text: "snap", outputWatermark: watermark }),
+      summarize: async () => {
+        if (shouldThrow) throw new Error("provider 503");
+        return { text: "fresh summary", sessionId: "ses_fresh" };
+      },
+    });
+
+    // The cache traps summarize's rejection behind summaryFailed=true rather
+    // than letting it bubble -- a summary is advisory and a transient
+    // provider failure must not crash the surrounding refresh. We just need
+    // to confirm the failure path left the session/watermark caches empty.
+    const failed = await cache.refresh(task, { force: true });
+    assert.equal(failed.summaryFailed, true);
+    assert.equal(cache.getSummarySessionId(task.id), null);
+    assert.equal(cache.getLastSummarizedWatermark(task.id), 0);
+
+    // Bump the snapshot watermark so the next refresh isn't a cache hit on
+    // the failed entry (the cache stores every result, including failures).
+    shouldThrow = false;
+    watermark = 20;
+    const result = await cache.refresh(task, { force: true });
+
+    assert.equal(result.activity, "fresh summary");
+    assert.equal(cache.getSummarySessionId(task.id), "ses_fresh");
+    assert.equal(cache.getLastSummarizedWatermark(task.id), 20);
+  });
+
+  test("clearSummaryState wipes both session id and watermark so the next call starts as if no summary had happened", async () => {
+    const cache = createActivityCache({
+      summariesEnabled: true,
+      summarizerTimeoutMs: 0,
+      snapshot: () => ({ text: "snap", outputWatermark: 10 }),
+      summarize: async () => ({ text: "summary", sessionId: "ses_x" }),
+    });
+
+    await cache.refresh(task, { force: true });
+    assert.equal(cache.getSummarySessionId(task.id), "ses_x");
+
+    cache.clearSummaryState(task.id);
+
+    assert.equal(cache.getSummarySessionId(task.id), null);
+    assert.equal(cache.getLastSummarizedWatermark(task.id), 0);
   });
 
   test("passes --summaries through watch and keeps Claude monitor output to one line", async () => {

@@ -52,7 +52,7 @@ obviously belong to args parsing or output formatting, start there.
 | `output.js` | 174 | TOON encoding, `leanStatus`/`leanResult`/`projectList`/`homeView`, hint-string MCP-name migration. |
 | `opencode-plugin.js` | 174 | OpenCode's native plugin surface: toasts on task state transitions by polling `client.js` directly. |
 | `setup.js` | 210 | `taskferry setup`: npm install, managed symlinks, per-client integration registration (see `docs/superpowers/specs/2026-07-16-taskferry-setup-design.md`). |
-| `scripts/generate-skill.js` | — | Regenerates `integrations/*/skills/taskferry/SKILL.md` from `skills/taskferry/SKILL.md`; `--check` fails on drift. |
+| `scripts/generate-skill.js` | — | Regenerates `integrations/*/skills/using-taskferry/SKILL.md` from `skills/using-taskferry/SKILL.md`; `--check` fails on drift. |
 
 Every `*.js` above has a co-located `*.test.js` (`node --test`, no
 framework); `smoke-test.js`/`cancel-smoke-test.js`/`poll-smoke-test.js` are
@@ -71,30 +71,36 @@ not part of the default `npm test`).
 | Per-agent (Claude Code/Codex/OpenCode) setup | `docs/integrations/*.md` |
 | Open design questions, past decisions | `docs/superpowers/specs/*.md`, `docs/superpowers/plans/*.md` |
 | What's left to build, what's blocked, what's deliberately skipped | `todo.txt` (repo root) |
-| The canonical agent-facing skill (regenerate after any CLI-surface change) | `skills/taskferry/SKILL.md`, then `npm run skill:generate` |
+| The canonical agent-facing skill (regenerate after any CLI-surface change) | `skills/using-taskferry/SKILL.md`, then `npm run skill:generate` |
+| User-tunable options via a JSON config file (as an alternative to env vars) | `docs/config.md` |
 
 ## Env vars
 
 All `TASKFERRY_*` vars the daemon or CLI reads, gathered in one place
 (individual docs above cover behavior; this is just the index):
 
-| Var | Default | Purpose |
-|---|---|---|
-| `TASKFERRY_STATE_DIR` | `$XDG_STATE_HOME/taskferry` or `~/.local/state/taskferry` | Task state, logs, summary prompts |
-| `TASKFERRY_RUNTIME_DIR` | `$XDG_RUNTIME_DIR/taskferry` or `<state-dir>/run` | Socket + lock files |
-| `TASKFERRY_SOCKET_PATH` | `<runtime-dir>/daemon.sock` | Explicit socket override |
-| `TASKFERRY_MAX_CONCURRENT_TASKS` | `4` | Running-task concurrency cap |
-| `TASKFERRY_MAX_DISPATCHES_PER_WINDOW` / `TASKFERRY_DISPATCH_WINDOW_MS` | `2` / `5000` | Dispatch burst-rate limit |
-| `TASKFERRY_NO_OUTPUT_TIMEOUT_MS` | `120000` | Pre-output-seen watchdog deadline |
-| `TASKFERRY_WATCHDOG_POLL_MS` | `2000` | Watchdog check interval |
-| `TASKFERRY_KEY_SLOTS` | — | Named provider-key slot registry; see `docs/security.md` |
-| `TASKFERRY_PROVIDER_KEY_ENV` | — | Source env var a key slot copies from |
-| `TASKFERRY_SUMMARY_MODEL` | `opencode/hy3-free` | Model behind `summary --style report` |
-| `TASKFERRY_SUMMARY_KEY_SLOT` / `TASKFERRY_SUMMARY_PROVIDER_KEY_ENV` | — | Key-slot wiring specific to the summary model |
-| `TASKFERRY_ACTIVITY_SUMMARIES` | — | Enables `watch --summaries` / activity-style model calls |
-| `TASKFERRY_ACTIVITY_MIN_INTERVAL_MS` | `60000` | Throttle between activity-summary model calls |
-| `TASKFERRY_ADVISOR_SESSION_TTL_MS` | `1800000` (30 min) | Advisor session idle expiry before auto-reset |
-| `TASKFERRY_CHILD` | — | Set on the daemon's own spawned children; see `docs/security.md` |
+Vars marked "config.json" also have a config-file equivalent — see
+`docs/config.md` — where the env var, if set, still takes precedence.
+
+| Var | Default | Config file? | Purpose |
+|---|---|---|---|
+| `TASKFERRY_STATE_DIR` | `$XDG_STATE_HOME/taskferry` or `~/.local/state/taskferry` | no | Task state, logs, summary prompts |
+| `TASKFERRY_RUNTIME_DIR` | `$XDG_RUNTIME_DIR/taskferry` or `<state-dir>/run` | no | Socket + lock files |
+| `TASKFERRY_SOCKET_PATH` | `<runtime-dir>/daemon.sock` | no | Explicit socket override |
+| `TASKFERRY_MAX_CONCURRENT_TASKS` | `4` | yes | Running-task concurrency cap |
+| `TASKFERRY_MAX_DISPATCHES_PER_WINDOW` / `TASKFERRY_DISPATCH_WINDOW_MS` | `2` / `5000` | yes | Dispatch burst-rate limit |
+| `TASKFERRY_NO_OUTPUT_TIMEOUT_MS` | `256000` (~4.3 min) | yes | Pre-output-seen watchdog deadline |
+| `TASKFERRY_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS` | `400000` (~6.7 min) | yes | Watchdog deadline once a task has produced its first log event |
+| `TASKFERRY_WATCHDOG_POLL_MS` | `2000` | no | Watchdog check interval |
+| `TASKFERRY_KEY_SLOTS` | — | yes | Named provider-key slot registry; see `docs/security.md` |
+| `TASKFERRY_PROVIDER_KEY_ENV` | — | yes | Source env var a key slot copies from |
+| `TASKFERRY_SUMMARY_MODEL` | `opencode/hy3-free` | yes | Model behind `summary --style report` |
+| `TASKFERRY_SUMMARY_KEY_SLOT` / `TASKFERRY_SUMMARY_PROVIDER_KEY_ENV` | — | yes | Key-slot wiring specific to the summary model |
+| `TASKFERRY_ACTIVITY_SUMMARIES` | `true` | yes | Enables `watch --summaries` / activity-style model calls |
+| `TASKFERRY_SUMMARIZER_TIMEOUT_MS` | `180000` | yes | Throttle between activity-summary model calls |
+| `TASKFERRY_ACTIVITY_MAX_WORDS` | `75` | yes | Max words in an activity-style summary |
+| `TASKFERRY_ADVISOR_SESSION_TTL_MS` | `1800000` (30 min) | yes | Advisor session idle expiry before auto-reset |
+| `TASKFERRY_CHILD` | — | no | Set on the daemon's own spawned children; see `docs/security.md` |
 
 ## Things that look like bugs but aren't
 
@@ -107,3 +113,12 @@ All `TASKFERRY_*` vars the daemon or CLI reads, gathered in one place
 - A `SKILL.md` edit not showing up in `integrations/claude/skills/...` —
   run `npm run skill:generate`; the distributed copies are generated, not
   hand-edited.
+- Editing `~/.claude/skills/using-taskferry/SKILL.md` directly does nothing for
+  this repo — it's a separate manual copy for global availability outside
+  the plugin (see `docs/integrations/claude-code.md`), not synced from or
+  to the canonical `skills/using-taskferry/SKILL.md`. Edit the canonical file,
+  run `npm run skill:generate`, then re-copy to `~/.claude/skills/` by hand.
+- The daemon restarting itself with no `taskferry` command involved — expected
+  when a source `.js` file's mtime moved forward since startup (a merge
+  landed) and no tasks were running/queued; see
+  `docs/daemon.md#self-restart-on-source-change`.
