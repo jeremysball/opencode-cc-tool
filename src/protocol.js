@@ -88,14 +88,15 @@ function validParams(method, params) {
     case "system.health":
       return hasOnly(params, []);
     case "task.dispatch":
-      return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "keySlot", "finalMarker"])
+      return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "keySlot", "finalMarker", "originSessionId"])
         && isNonEmptyString(params.prompt)
         && isAbsolutePath(params.directory)
         && optional(params.model, isNonEmptyString)
         && optional(params.variant, isNonEmptyString)
         && optional(params.sessionId, isNonEmptyString)
         && optional(params.keySlot, isNonEmptyString)
-        && optional(params.finalMarker, isNonEmptyString);
+        && optional(params.finalMarker, isNonEmptyString)
+        && optional(params.originSessionId, isNonEmptyString);
     case "task.cancel":
       return hasOnly(params, ["taskId", "graceMs"])
         && isNonEmptyString(params.taskId)
@@ -134,9 +135,10 @@ function validParams(method, params) {
     case "task.context":
       return hasOnly(params, ["directory"]) && isAbsolutePath(params.directory);
     case "event.subscribe":
-      return hasOnly(params, ["directory", "summaries"])
+      return hasOnly(params, ["directory", "summaries", "originSessionId"])
         && isAbsolutePath(params.directory)
-        && optional(params.summaries, (value) => typeof value === "boolean");
+        && optional(params.summaries, (value) => typeof value === "boolean")
+        && optional(params.originSessionId, isNonEmptyString);
     default:
       return false;
   }

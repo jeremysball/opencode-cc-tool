@@ -415,6 +415,89 @@ test("doctor reports the claude plugin as not installed when the claude CLI is m
   assert.equal(result.warnings.length, 1);
 });
 
+test("watch forwards originSessionId to client.subscribe when set", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const controller = new AbortController();
+  let capturedParams;
+  const client = fakeClient({
+    onSubscribe: (params) => {
+      capturedParams = params;
+      controller.abort();
+    },
+  });
+  const io = fakeIo();
+
+  await runCommand("watch", { directory: root, format: "claude-monitor", summaries: false, originSessionId: "sess-abc" }, {
+    client,
+    io,
+    signal: controller.signal,
+    cwd: root,
+  });
+
+  assert.equal(capturedParams.originSessionId, "sess-abc");
+});
+
+test("watch omits originSessionId from client.subscribe when not set", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const controller = new AbortController();
+  let capturedParams;
+  const client = fakeClient({
+    onSubscribe: (params) => {
+      capturedParams = params;
+      controller.abort();
+    },
+  });
+  const io = fakeIo();
+
+  await runCommand("watch", { directory: root, format: "toon", summaries: false }, {
+    client,
+    io,
+    signal: controller.signal,
+    cwd: root,
+  });
+
+  assert.equal("originSessionId" in capturedParams, false);
+});
+
+test("dispatch includes originSessionId from CLAUDE_CODE_SESSION_ID when set", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const previous = process.env.CLAUDE_CODE_SESSION_ID;
+  process.env.CLAUDE_CODE_SESSION_ID = "sess-env-abc";
+  try {
+    let capturedParams;
+    const client = {
+      request: async (method, params) => {
+        capturedParams = params;
+        return { id: "oc_1" };
+      },
+    };
+    await runCommand("dispatch", { prompt: "hi", directory: root }, { client, cwd: root });
+    assert.equal(capturedParams.originSessionId, "sess-env-abc");
+  } finally {
+    if (previous === undefined) delete process.env.CLAUDE_CODE_SESSION_ID;
+    else process.env.CLAUDE_CODE_SESSION_ID = previous;
+  }
+});
+
+test("dispatch omits originSessionId when CLAUDE_CODE_SESSION_ID is unset", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const previous = process.env.CLAUDE_CODE_SESSION_ID;
+  delete process.env.CLAUDE_CODE_SESSION_ID;
+  try {
+    let capturedParams;
+    const client = {
+      request: async (method, params) => {
+        capturedParams = params;
+        return { id: "oc_1" };
+      },
+    };
+    await runCommand("dispatch", { prompt: "hi", directory: root }, { client, cwd: root });
+    assert.equal("originSessionId" in capturedParams, false);
+  } finally {
+    if (previous !== undefined) process.env.CLAUDE_CODE_SESSION_ID = previous;
+  }
+});
+
 test("doctor reports a distinct reason when claude exits with a non-ENOENT spawn error", async () => {
   const client = fakeClient();
   client.request = async (method) => {

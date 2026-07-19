@@ -285,6 +285,7 @@ export async function startDaemon({
   const onEvent = (event) => {
     for (const [subscriptionId, subscription] of subscriptions) {
       if (event.directory !== subscription.directory || subscription.socket.destroyed) continue;
+      if (subscription.originSessionId && event.originSessionId && subscription.originSessionId !== event.originSessionId) continue;
       writeMessage(subscription.socket, eventMessage(subscriptionId, event));
     }
   };
@@ -349,6 +350,7 @@ export async function startDaemon({
                 socket,
                 directory: normalizeDirectory(request.params.directory),
                 summaries: request.params.summaries === true,
+                originSessionId: request.params.originSessionId || null,
               });
               updateSummarySubscriptions();
               writeMessage(socket, successResponse(request.id, { subscriptionId }));

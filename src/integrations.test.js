@@ -31,7 +31,7 @@ test("Claude plugin manifests describe only the taskferry native integration", (
   assert.deepEqual(monitors, [{
     name: "taskferry",
     description: "Taskferry task activity",
-    command: 'taskferry watch --directory "${CLAUDE_PROJECT_DIR}" --format claude-monitor --summaries',
+    command: 'taskferry watch --directory "${CLAUDE_PROJECT_DIR}" --format claude-monitor --summaries ${CLAUDE_CODE_SESSION_ID:+--origin-session-id "$CLAUDE_CODE_SESSION_ID"}',
   }]);
   assert.equal(Array.isArray(hooks.hooks.SessionStart), true);
   assert.equal(hooks.hooks.SessionStart.length, 1);

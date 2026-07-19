@@ -4,6 +4,7 @@
  * @property {string} directory
  * @property {string} status
  * @property {boolean} [internal]
+ * @property {string|null} [originSessionId]
  */
 
 /**
@@ -30,6 +31,7 @@ export function createTaskEvents(onEvent) {
       type: "task.state",
       taskId: task.id,
       directory: task.directory,
+      originSessionId: task.originSessionId ?? null,
       status: task.status,
       previousStatus: emittedStatus ?? previousStatus,
       occurredAt: new Date().toISOString(),

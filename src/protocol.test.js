@@ -85,6 +85,38 @@ describe("private daemon protocol", () => {
     assert.equal(RPC_METHODS.includes("event.subscribe"), false);
   });
 
+  test("task.dispatch accepts an optional originSessionId string", () => {
+    const parsed = parseRequestLine(request("task.dispatch", {
+      prompt: "hi",
+      directory: "/tmp/project",
+      originSessionId: "sess-abc",
+    }));
+    assert.equal(parsed.params.originSessionId, "sess-abc");
+  });
+
+  test("task.dispatch rejects a non-string originSessionId", () => {
+    assert.throws(() => parseRequestLine(request("task.dispatch", {
+      prompt: "hi",
+      directory: "/tmp/project",
+      originSessionId: 42,
+    })), /invalid params/i);
+  });
+
+  test("event.subscribe accepts an optional originSessionId string", () => {
+    const parsed = parseRequestLine(request("event.subscribe", {
+      directory: "/tmp/project",
+      originSessionId: "sess-abc",
+    }));
+    assert.equal(parsed.params.originSessionId, "sess-abc");
+  });
+
+  test("event.subscribe rejects a non-string originSessionId", () => {
+    assert.throws(() => parseRequestLine(request("event.subscribe", {
+      directory: "/tmp/project",
+      originSessionId: 42,
+    })), /invalid params/i);
+  });
+
   test("rejects invalid request envelopes and params", () => {
     assert.throws(
       () => parseRequestLine(JSON.stringify({ version: 1, id: "req-1", method: "system.health" })),

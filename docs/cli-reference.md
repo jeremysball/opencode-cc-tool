@@ -240,6 +240,7 @@ SIGTERM), then exits cleanly with code `0`.
 | `--format toon\|claude-monitor\|ndjson` | Stream format, default `toon` |
 | `--summaries` | Request live activity summaries (a secondary model call); see [security.md](security.md) |
 | `--task-id <id>` | Scope the stream to one task; `watch` then exits on its own once that task settles, instead of running until interrupted |
+| `--origin-session-id <id>` | Requires `--format claude-monitor`. Only stream events from tasks dispatched with the same origin session id, so multiple Claude Code windows in the same workspace don't see each other's task notifications |
 
 Without `--task-id`, `watch` streams every task in the workspace until
 interrupted. With it, `--directory` is optional — it's resolved from the
