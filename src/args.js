@@ -116,6 +116,7 @@ const commandSpecs = {
       "--task-id <id>": "scope the stream to one task; exits automatically once it settles",
       "--format toon|claude-monitor|ndjson": "stream format, default toon",
       "--summaries": "request activity summaries when available",
+      "--origin-session-id <id>": "with --format claude-monitor, only stream tasks dispatched with the same origin session id",
     },
     examples: ['taskferry watch', 'taskferry watch --task-id <id> --summaries', 'taskferry watch --format ndjson'],
   },
@@ -260,7 +261,7 @@ function defaultOptions(command, cwd) {
     case "list":
       return { directory: cwd, all: false, limit: undefined };
     case "watch":
-      return { directory: undefined, format: "toon", summaries: false, taskId: undefined };
+      return { directory: undefined, format: "toon", summaries: false, taskId: undefined, originSessionId: undefined };
     case "context":
       return { directory: cwd, format: "toon" };
     case "doctor":
@@ -355,6 +356,7 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       "--format": "format",
       "--task-id": "taskId",
       "--require-final-marker": "finalMarker",
+      "--origin-session-id": "originSessionId",
     };
     const key = values[name];
     if (!key || !commandAllows(command, name)) throw usageError(`unknown flag ${name} for \`${command}\``, command);
@@ -399,6 +401,9 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
     if (command === "wait" && options.summarize && options.tailChars !== undefined) {
       throw usageError("--summarize cannot be combined with --tail-chars", command);
     }
+    if (command === "watch" && options.originSessionId !== undefined && options.format !== "claude-monitor") {
+      throw usageError("--origin-session-id requires --format claude-monitor", command);
+    }
   }
   return { command, options, help, ...(help ? { helpText: helpText(command) } : {}) };
 }
@@ -414,7 +419,7 @@ function commandAllows(command, flag) {
     summary: ["--style", "--max-words"],
     result: ["--fields"],
     list: ["--directory", "--limit"],
-    watch: ["--directory", "--format", "--task-id"],
+    watch: ["--directory", "--format", "--task-id", "--origin-session-id"],
     context: ["--directory", "--format"],
     doctor: [],
   };
