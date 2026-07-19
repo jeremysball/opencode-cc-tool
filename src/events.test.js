@@ -5,6 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createTaskManager } from "./tasks.js";
+import { createTaskEvents } from "./events.js";
 
 function fakeChild(pid = 4242) {
   const child = new EventEmitter();
@@ -77,6 +78,7 @@ describe("task lifecycle events", () => {
       "type",
       "taskId",
       "directory",
+      "originSessionId",
       "status",
       "previousStatus",
       "occurredAt",
@@ -191,6 +193,20 @@ describe("task lifecycle events", () => {
     makeManager({ tasks: [summary], onEvent: (event) => events.push(event) });
 
     assert.deepEqual(events, []);
+  });
+
+  test("emitState includes the task's originSessionId on the emitted event", () => {
+    const events = [];
+    const { emitState } = createTaskEvents((event) => events.push(event));
+    emitState({ id: "t1", directory: "/tmp/project", status: "running", originSessionId: "sess-abc" });
+    assert.equal(events[0].originSessionId, "sess-abc");
+  });
+
+  test("emitState defaults originSessionId to null when the task has none", () => {
+    const events = [];
+    const { emitState } = createTaskEvents((event) => events.push(event));
+    emitState({ id: "t1", directory: "/tmp/project", status: "running" });
+    assert.equal(events[0].originSessionId, null);
   });
 
   test("does not let an event callback failure change task lifecycle", () => {
