@@ -66,6 +66,7 @@ export async function runCommand(command, options, { client, io = process, signa
         ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
         ...(options.keySlot === undefined ? {} : { keySlot: options.keySlot }),
         ...(options.finalMarker === undefined ? {} : { finalMarker: options.finalMarker }),
+        ...(process.env.CLAUDE_CODE_SESSION_ID ? { originSessionId: process.env.CLAUDE_CODE_SESSION_ID } : {}),
       });
     }
     case "cancel":
@@ -194,7 +195,7 @@ function terminalEventFromStatus(detail) {
   };
 }
 
-function streamTaskEvents({ client, io, signal, directory, taskId, summaries, format }) {
+function streamTaskEvents({ client, io, signal, directory, taskId, summaries, format, originSessionId }) {
   let settle;
   let abortHandler;
   const finished = new Promise((resolve, reject) => {
@@ -210,7 +211,7 @@ function streamTaskEvents({ client, io, signal, directory, taskId, summaries, fo
       return;
     }
     signal?.addEventListener("abort", abortHandler, { once: true });
-    Promise.resolve(client.subscribe({ directory, ...(summaries ? { summaries: true } : {}) }, (event) => {
+    Promise.resolve(client.subscribe({ directory, ...(summaries ? { summaries: true } : {}), ...(originSessionId ? { originSessionId } : {}) }, (event) => {
       if (taskId && event.taskId !== taskId) return;
       io.stdout.write(`${formatWatchEvent(event, format)}\n`);
       if (taskId && TERMINAL_STATUSES.has(event.status)) {
@@ -253,6 +254,7 @@ async function watchCommand(options, { client, io, signal, cwd }) {
     taskId: options.taskId,
     summaries: options.summaries,
     format: options.format,
+    originSessionId: options.originSessionId,
   }).finally(() => {
     if (client.close) client.close();
   });
