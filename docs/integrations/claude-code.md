@@ -68,15 +68,22 @@ want it gone too (see [daemon.md](../daemon.md#stopping-the-daemon)).
   session start.
 - **Monitor** (`integrations/claude/monitors/monitors.json`): registers a
   `taskferry` monitor backed by `taskferry watch --directory
-  "${CLAUDE_PROJECT_DIR}" --format claude-monitor --summaries`. This is a
-  long-lived streaming process Claude Code's UI reads from; each line is a
-  static `Taskferry(<status> · <id>): <activity>` string, since Claude
-  Code's monitor surface displays a fixed label per update rather than a
-  dynamic per-task title (compare with OpenCode's dynamic toasts, below).
-  `--summaries` means the activity text can include a real model-generated
-  summary, not just local narration — see
+  "${CLAUDE_PROJECT_DIR}" --format claude-monitor --summaries
+  ${CLAUDE_CODE_SESSION_ID:+--origin-session-id "$CLAUDE_CODE_SESSION_ID"}`.
+  This is a long-lived streaming process Claude Code's UI reads from; each
+  line is a static `Taskferry(<status> · <id>): <activity>` string, since
+  Claude Code's monitor surface displays a fixed label per update rather
+  than a dynamic per-task title (compare with OpenCode's dynamic toasts,
+  below). `--summaries` means the activity text can include a real
+  model-generated summary, not just local narration — see
   [security.md](../security.md#activity-summaries) for what that costs and
-  how to disable it.
+  how to disable it. `CLAUDE_CODE_SESSION_ID` is an undocumented env var
+  Claude Code sets in the monitor process's environment; when present, it
+  scopes notifications to the Claude Code window that dispatched the task,
+  so multiple windows open on the same workspace don't see each other's
+  task activity. `${VAR:+word}` shell expansion means the flag is simply
+  omitted (falling back to today's unscoped, broadcast-to-all behavior) on
+  any Claude Code version where the env var isn't set.
 - **Skill** (`integrations/claude/skills/using-taskferry/SKILL.md`): a generated
   copy of the canonical `skills/using-taskferry/SKILL.md` (`npm run
   skill:generate`; `npm run skill:check` fails the build if it drifts),
