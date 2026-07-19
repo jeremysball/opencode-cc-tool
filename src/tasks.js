@@ -784,9 +784,9 @@ export function createTaskManager({
    * @param {string} params.directory
    * @param {string} [params.model]
    * @param {string} [params.variant]
- * @param {string|undefined} [params.sessionId]
- * @param {string|undefined} [params.originSessionId]
- * @param {string|null} [params.keySlot]
+   * @param {string|undefined} [params.sessionId]
+   * @param {string|undefined} [params.originSessionId]
+   * @param {string|null} [params.keySlot]
    * @param {boolean} [params.internal]
    * @param {string|null} [params.finalMarker]
    * @returns {TaskSummary & {next: string}}

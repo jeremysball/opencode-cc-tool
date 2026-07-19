@@ -192,6 +192,7 @@ function terminalEventFromStatus(detail) {
     occurredAt: new Date().toISOString(),
     activity: null,
     outputWatermark: null,
+    originSessionId: detail.originSessionId ?? null,
   };
 }
 
