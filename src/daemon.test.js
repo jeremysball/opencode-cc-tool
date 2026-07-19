@@ -257,6 +257,29 @@ describe("Unix socket daemon", () => {
     assert.equal(daemon.stats().subscriptions, 3);
   });
 
+  test("event.subscribe with originSessionId only receives same-origin events, and origin-less events broadcast to everyone", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+    t.after(() => daemon.close());
+    const first = await openPeer(paths.socketPath);
+    const second = await openPeer(paths.socketPath);
+    t.after(() => first.close());
+    t.after(() => second.close());
+
+    await first.request("sub-first", "event.subscribe", { directory: paths.root, originSessionId: "sess-A" });
+    await second.request("sub-second", "event.subscribe", { directory: paths.root, originSessionId: "sess-B" });
+
+    fake.emit({ type: "task.state", taskId: "one", directory: paths.root, status: "running", originSessionId: "sess-A" });
+    fake.emit({ type: "task.state", taskId: "two", directory: paths.root, status: "running", originSessionId: "sess-B" });
+    fake.emit({ type: "task.state", taskId: "three", directory: paths.root, status: "done" });
+
+    const firstEvents = await first.waitForEvents(2);
+    const secondEvents = await second.waitForEvents(2);
+    assert.deepEqual(firstEvents.map((message) => message.event.taskId), ["one", "three"]);
+    assert.deepEqual(secondEvents.map((message) => message.event.taskId), ["two", "three"]);
+  });
+
   test("cleans up all subscriptions when a client disconnects", async (t) => {
     const paths = temporaryPaths(t);
     const fake = fakeManagerFactory();
