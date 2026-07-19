@@ -28,6 +28,44 @@ execution. Taskferry is not an alternative lifecycle.
 - Wait for settlement, retrieve the result, handle crashes, and validate the
   worker's deliverables yourself.
 
+## Choosing a Model
+
+See `picking-a-model` for the full tier breakdown (cheapest/standard/
+most-capable), the role-to-tier mapping, and effort-level nuances. The
+summary that matters here: use the least powerful model that can handle
+each role, not reflexively the strongest one available — but the review
+role never inherits the implementer's tier just because the diff being
+reviewed was mechanical. Escalate tier when the task is architecturally
+risky, security-sensitive, or has already failed on a lighter model.
+
+- **Always specify the model explicitly when dispatching through
+  `taskferry`.** An omitted `--model` falls back to taskferry's own default,
+  which may not match the tier the task actually needs.
+- **Task reviewers need a standard-tier floor, always** — reviewing a diff
+  requires judgment even when the diff itself was cheap-tier transcription
+  work. Dispatching the cheapest available model as a task reviewer because
+  the implementer task was cheap is a documented anti-pattern (see
+  `picking-a-model`), not an acceptable cost optimization.
+- **Turn count beats token price.** The cheapest models routinely take
+  2-3× the turns on multi-step work, costing more overall in wall-clock and
+  context than a standard-tier model that finishes clean. Reserve the cheapest
+  tier for implementers whose brief already contains the exact code to
+  write (transcription plus testing) and single-file mechanical fixes.
+- **Provider-specific availability rules (time windows, key-slot limits,
+  single-in-flight constraints) live in your CLAUDE.md, not here** — check
+  it before dispatching to a gated provider, and pick an equivalent model
+  on another provider rather than waiting idle or dispatching outside the
+  allowed window.
+- **Reliability is part of "good enough."** A model that crashes or times
+  out on a large fraction of its dispatches costs more in wall-clock retries
+  than a slightly pricier model that finishes clean the first time. Two or
+  more `no_output_timeout` crashes running on the same model+task shape is a
+  signal to switch model or provider, not to keep retrying unchanged — see
+  `no_output_timeout` Crashes below.
+- When unsure which model fits, check recent `taskferry list`/`context`
+  history for how that model has actually performed on similar work in this
+  workspace, rather than defaulting to habit or reaching for the biggest name.
+
 ## AXI CLI
 
 Store each long prompt under Taskferry's XDG state tree. Create the parent directory,
@@ -49,13 +87,20 @@ Inspect and wait for a task:
 
 ```sh
 taskferry status <id>
-taskferry wait <id> --tail-chars 1000
+taskferry wait <id>
 taskferry tail <id> --chars 2000
 ```
 
 Do not pass `--timeout-ms` to `taskferry wait`. The process exits on its own the
 moment the task settles; a timeout only makes the caller re-issue `wait` in a
 polling loop for no benefit.
+
+`wait` also takes a `--tail-chars <number>` option, but it only fires on a
+`--timeout-ms` timeout (trailing text characters from that point) — since
+`--timeout-ms` itself is not something to pass (previous paragraph), treat
+`--tail-chars` as dead weight too and don't reach for it. For the settled
+result, use `taskferry result <id> --fields ...` (see below) instead — it
+returns real structured fields, not a raw character tail.
 
 For a long-running task, prefer `taskferry wait <id> --summarize` over a bare
 `wait`: it streams periodic one-line summaries of the task's narration tail
@@ -65,6 +110,97 @@ hand. To watch one specific task's live event stream instead of the whole
 workspace's, use `taskferry watch --task-id <id>` rather than an unscoped
 `taskferry watch`; add `--summaries` to get condensed activity summaries in
 that stream instead of raw events.
+
+**Inside Claude Code, always run `wait --summarize` via `Bash`
+`run_in_background: true`, then immediately arm a `Monitor` tailing that
+background job's own output file** (the file path the `Bash` tool reports back
+at launch, e.g. `/tmp/.../tasks/<bash-id>.output`) with `tail -n0 -F <path>`,
+`persistent: true`. `run_in_background` only notifies once, on the whole
+command's exit — it does not surface each summary line as it's written, so
+without a `Monitor` the summaries sit in that file unseen until settlement.
+`tail -n0 -F` starts from the end so you don't re-emit lines already read, and
+turns every new summary line into its own notification as it lands (every
+~3 minutes by default — `DEFAULT_SUMMARIZER_TIMEOUT_MS` in `src/activity.js`,
+overridable via `TASKFERRY_SUMMARIZER_TIMEOUT_MS`). Stop the monitor with `TaskStop` once the wait job's own completion
+notification confirms the task settled.
+
+Relay every summary-line notification with this exact template:
+
+`⛴ <emoji> <short-task-id> <NN%> — <clause>`
+
+- `<short-task-id>` — the taskferry task id, shortened to its first segment
+  (e.g. `oc_mrpxgbg8`). This always exists, unlike other context, which may
+  not apply to the dispatch at all. Add a human label in parens right after
+  it only when one is genuinely in context, and always name what kind of
+  thing it is — `issue #35`, `PR #12`, never a bare `#35` that leaves the
+  reader guessing issue vs. PR vs. something else.
+- `<emoji>` — pick one that actually fits what this specific update is
+  about, not a rotating decoration and not the same emoji every time. Read
+  the narration tail and choose freely: 🔨 mid-implementation, 🧪 running or
+  fixing tests, 📝 writing docs, 🔍 investigating/debugging, ✅ settled
+  clean, ⚠️ a concern worth a second look, 🚨 crashed or blocked. Treat this
+  list as a starting palette, not an enum — reach for whatever emoji best
+  matches the actual moment (including something outside this list) rather
+  than forcing the nearest listed option.
+- `<NN%>` — required on every update, never omitted. Estimate from where the
+  task brief's steps actually stand (e.g. "tests written, docs still
+  pending" reads differently than "just started"), not from elapsed time
+  alone.
+- `<clause>` — one compact clause of the actual substance: files/functions
+  touched, what step completed, what's left. Not a restatement of everything
+  said in prior updates.
+
+Never append a "no push needed" / "no action needed" verdict line — silence
+on that front is the default, so saying so out loud on every single update is
+pure noise. Only speak up beyond the one-line update when something genuinely
+warrants the user's attention (a blocker, a crash, settlement).
+
+Example: `⛴ 📝 oc_mrpxgbg8 (issue #35) 90% — docs updated, finishing the
+result section, tests and lint already green.`
+
+**Inside OpenCode itself (opencode as the host running taskferry, not Claude
+Code), none of the above Monitor pattern applies, and there is no way to
+manufacture a live-update experience.** OpenCode's own Bash tool is
+synchronous and foreground-only — no `run_in_background`, no event-push
+mechanism equivalent to `Monitor`, and no async wake primitive at all. OpenCode
+only gets to say anything during a turn it is already taking; nothing can
+interrupt it mid-task to post a progress line, so genuinely proactive "live"
+updates are not achievable here. Don't imply otherwise. The honest options,
+in order of preference:
+
+1. **No interim updates.** Report once, at settlement. This is the default
+   for most dispatches.
+2. **Pull, not push.** If the user asks how it's going while the task runs,
+   check the backgrounded log's tail at that moment and answer. This only
+   works because the user's message is itself the trigger — it is not a
+   standing update loop.
+3. **Piggyback, don't dedicate.** If opencode is already taking a turn for
+   an unrelated reason while the dispatch runs, a cheap glance at the log
+   tail as a side action is fine. Do not spend a turn *solely* to poll for
+   an update nobody asked for — that reintroduces the wasted-wall-time
+   pattern this whole guidance exists to avoid.
+
+Background the wait rather than blocking the turn on it directly —
+opencode's own Bash tool has nothing like `run_in_background`, so a
+foreground `wait` ties up the whole turn until settlement, with no way to
+do anything else (including answering the user) in the meantime. Use
+`--summarize` here too, same as the Claude Code case above: it periodically
+condenses the narration tail into the log instead of leaving raw NDJSON
+sitting there, which is what actually makes options 2–3's occasional peek
+worth reading rather than a wall of unprocessed events:
+
+```sh
+nohup taskferry wait <id> --summarize > /tmp/taskferry-wait-<id>.log 2>&1 &
+disown
+```
+
+That call returns immediately. Settlement shows up as the job's exit and a
+final line in the log; check `cat /tmp/taskferry-wait-<id>.log` (or `jobs`)
+when you're about to report on the task rather than polling it on a timer.
+For options 2–3 above, where you need a look at progress before it settles,
+reading that same log's tail (`tail -n 5 /tmp/taskferry-wait-<id>.log`) is
+the right move — it's the summarized view, cheaper to read than a raw
+`taskferry tail`.
 
 Read the final result and request an independent review when needed:
 
