@@ -7,7 +7,7 @@ import { formatToolEventForNarration } from "./narration-format.js";
 /** @typedef {{text: string|null, sessionId: string|null}} SummarizeOutcome */
 
 const ACTIVITY_REFRESH_BYTES = 4096;
-export const DEFAULT_SUMMARIZER_TIMEOUT_MS = 180000;
+export const DEFAULT_SUMMARIZER_TIMEOUT_MS = 360000;
 const DEFAULT_ACTIVITY_SNAPSHOT_BYTES = 96 * 1024;
 const DEFAULT_ACTIVITY_MAX_CHARS = 4000;
 

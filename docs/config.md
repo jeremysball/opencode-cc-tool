@@ -39,7 +39,7 @@ message — there is no silent typo tolerance.
 | `postOutputNoOutputTimeoutMs` | `TASKFERRY_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS` | number | `400000` |
 | `summaryModel` | `TASKFERRY_SUMMARY_MODEL` | string | `"opencode/hy3-free"` |
 | `activitySummariesEnabled` | `TASKFERRY_ACTIVITY_SUMMARIES` | boolean | `true` |
-| `summarizerTimeoutMs` | `TASKFERRY_SUMMARIZER_TIMEOUT_MS` | number | `180000` |
+| `summarizerTimeoutMs` | `TASKFERRY_SUMMARIZER_TIMEOUT_MS` | number | `360000` |
 | `activityMaxWords` | `TASKFERRY_ACTIVITY_MAX_WORDS` | number | `75` |
 | `advisorSessionTtlMs` | `TASKFERRY_ADVISOR_SESSION_TTL_MS` | number | `1800000` (30 min) |
 | `keySlots` | `TASKFERRY_KEY_SLOTS` | string | (none) |
