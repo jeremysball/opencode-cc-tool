@@ -334,6 +334,9 @@ export async function startDaemon({
         void (async () => {
           try {
             if (request.method === "event.subscribe") {
+              if (request.params.summaries === true && typeof manager.checkSummaryModelReady === "function") {
+                await manager.checkSummaryModelReady();
+              }
               const subscriptionId = randomUUID();
               subscriptions.set(subscriptionId, {
                 socket,
