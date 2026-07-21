@@ -237,6 +237,20 @@ function classifyProviderFailure(lines) {
     for (const [bucket, patterns] of PROVIDER_FAILURE_BUCKETS) {
       if (patterns.some((pattern) => pattern.test(text))) return { bucket, detail: capDetail(text) };
     }
+    // A structured `type:"error"` event is never noise -- unlike the raw
+    // non-JSON line branch above, this is opencode's own error signal, so an
+    // event that misses all three named buckets still deserves a reason
+    // rather than leaving failureReason/failureDetail null (e.g. a
+    // mid-stream "UnknownError: Streaming response failed" with zero model
+    // output, oc_mrutsm8i_764c0067). opencode's own error class name
+    // (UnknownError, ContextOverflowError, APIError, ...) becomes the
+    // bucket; its message becomes the detail.
+    const errorName = typeof evt.error?.name === "string" ? evt.error.name : "error";
+    const errorMessage = typeof evt.error?.data?.message === "string" ? evt.error.data.message : text;
+    return {
+      bucket: `opencode_${errorName.replace(/[^a-zA-Z0-9]+/g, "_").toLowerCase()}`,
+      detail: capDetail(errorMessage),
+    };
   }
   return null;
 }
