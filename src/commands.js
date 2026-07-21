@@ -214,7 +214,7 @@ function streamTaskEvents({ client, io, signal, directory, taskId, summaries, fo
     signal?.addEventListener("abort", abortHandler, { once: true });
     Promise.resolve(client.subscribe({ directory, ...(summaries ? { summaries: true } : {}), ...(originSessionId ? { originSessionId } : {}) }, (event) => {
       if (taskId && event.taskId !== taskId) return;
-      io.stdout.write(`${formatWatchEvent(event, format)}\n`);
+      io.stdout.write(`${formatWatchEvent(event, format, io.stdout.isTTY)}\n`);
       if (taskId && TERMINAL_STATUSES.has(event.status)) {
         settle({ directory, watching: false, event });
       }
@@ -227,7 +227,7 @@ function streamTaskEvents({ client, io, signal, directory, taskId, summaries, fo
       return client.request("task.status", { taskId }).then((detail) => {
         if (settled || !TERMINAL_STATUSES.has(detail.status)) return;
         const event = terminalEventFromStatus(detail);
-        io.stdout.write(`${formatWatchEvent(event, format)}\n`);
+        io.stdout.write(`${formatWatchEvent(event, format, io.stdout.isTTY)}\n`);
         settle({ directory, watching: false, event });
       });
     }).catch((error) => {

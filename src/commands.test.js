@@ -5,9 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { runCommand } from "./commands.js";
 
-function fakeIo() {
+function fakeIo({ isTTY } = {}) {
   const stdout = [];
-  return { stdout: { write: (chunk) => stdout.push(chunk) }, lines: stdout };
+  return { stdout: { isTTY, write: (chunk) => stdout.push(chunk) }, lines: stdout };
 }
 
 function fakeClient({ onSubscribe } = {}) {
@@ -53,6 +53,56 @@ test("watch prints each event through formatWatchEvent and resolves on abort", a
   assert.equal(result.watching, false);
   assert.equal(io.lines.length, 1);
   assert.match(io.lines[0], /oc_1/);
+});
+
+test("watch colors the status only when stdout is a TTY", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const controller = new AbortController();
+  let deliver;
+  const client = fakeClient({
+    onSubscribe: (_params, onEvent) => {
+      deliver = onEvent;
+    },
+  });
+  const io = fakeIo({ isTTY: true });
+
+  const pending = runCommand("watch", { directory: root, format: "toon", summaries: false }, {
+    client,
+    io,
+    signal: controller.signal,
+    cwd: root,
+  });
+
+  deliver({ sequence: 1, type: "task.state", taskId: "oc_1", directory: root, status: "done", previousStatus: "running" });
+  controller.abort();
+  await pending;
+
+  assert.ok(io.lines[0].includes("\x1b[32mdone\x1b[0m"));
+});
+
+test("watch never colors ndjson output even when stdout is a TTY", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  const controller = new AbortController();
+  let deliver;
+  const client = fakeClient({
+    onSubscribe: (_params, onEvent) => {
+      deliver = onEvent;
+    },
+  });
+  const io = fakeIo({ isTTY: true });
+
+  const pending = runCommand("watch", { directory: root, format: "ndjson", summaries: false }, {
+    client,
+    io,
+    signal: controller.signal,
+    cwd: root,
+  });
+
+  deliver({ sequence: 1, type: "task.state", taskId: "oc_1", directory: root, status: "done", previousStatus: "running" });
+  controller.abort();
+  await pending;
+
+  assert.ok(!io.lines[0].includes("\x1b["));
 });
 
 test("watch collapses a multi-line activity event to exactly one written line", async () => {

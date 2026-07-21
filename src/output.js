@@ -4,6 +4,25 @@ import { encode } from "@toon-format/toon";
 
 const HINT_KEYS = new Set(["help", "next", "note", "message"]);
 
+const ANSI_RESET = "\x1b[0m";
+const ANSI_BY_STATUS = {
+  done: "\x1b[32m", // green
+  crashed: "\x1b[31m", // red
+  cancelled: "\x1b[31m", // red
+  running: "\x1b[33m", // yellow
+  queued: "\x1b[33m", // yellow
+};
+
+/** Wrap text in an ANSI color code, but only when `enabled` (i.e. the target stream is a TTY). */
+export function colorize(text, code, enabled) {
+  return enabled && code ? `${code}${text}${ANSI_RESET}` : text;
+}
+
+/** @param {string} status */
+export function colorForStatus(status) {
+  return ANSI_BY_STATUS[status] || null;
+}
+
 function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
@@ -170,28 +189,29 @@ function shortTime(occurredAt) {
 // directory, outputWatermark, a previousStatus that's usually null) that's
 // noise to a human watching progress at a glance. Collapse each event to one
 // line: just the time, the task, and what actually changed.
-function formatActivityLine(event) {
+function formatActivityLine(event, useColor) {
   const time = shortTime(event.occurredAt);
   const prefix = time ? `${time} ` : "";
+  const status = colorize(event.status, colorForStatus(event.status), useColor);
   if (event.type === "task.state") {
     const transition = event.previousStatus && event.previousStatus !== event.status
-      ? `${event.previousStatus} -> ${event.status}`
-      : event.status;
+      ? `${event.previousStatus} -> ${status}`
+      : status;
     return `${prefix}${event.taskId} ${transition}`;
   }
   const activity = typeof event.activity === "string" && event.activity
     ? event.activity.replace(/[\r\n]+/g, " ")
     : event.status;
-  return `${prefix}${event.taskId} ${event.status}: ${activity}`;
+  return `${prefix}${event.taskId} ${status}: ${activity}`;
 }
 
-export function formatWatchEvent(event, format) {
+export function formatWatchEvent(event, format, useColor = false) {
   if (format === "ndjson") return JSON.stringify(event);
   if (format === "claude-monitor") {
     const activity = typeof event.activity === "string" && event.activity ? event.activity : `Task ${event.status}`;
     return `Taskferry(${event.status} · ${event.taskId}): ${activity.replace(/[\r\n]+/g, " ")}`;
   }
-  if (event.type === "task.activity" || event.type === "task.state") return formatActivityLine(event);
+  if (event.type === "task.activity" || event.type === "task.state") return formatActivityLine(event, useColor);
   return encode(event);
 }
 

@@ -349,6 +349,23 @@ test("surfaces setup failures on stderr and never connects to the daemon", async
   assert.match(capture.output().stderr, /help: fix the reported dependency or filesystem problem, then rerun node src\/cli\.js setup\n/);
 });
 
+test("colors setup failures on stderr only when stderr is a TTY", async () => {
+  let stderr = "";
+  const io = {
+    stdout: { write: () => {} },
+    stderr: { isTTY: true, write: (text) => { stderr += text; } },
+  };
+  const result = await runCli(["setup"], {
+    io,
+    setup: () => { throw new Error("boom"); },
+    connectClient: async () => { throw new Error("setup must not connect"); },
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.ok(stderr.includes("\x1b[31merror: boom\x1b[0m\n"));
+  assert.ok(stderr.includes("\x1b[2mhelp: fix the reported dependency or filesystem problem, then rerun node src/cli.js setup\x1b[0m\n"));
+});
+
 test("executes main() when invoked through a symlink to src/cli.js", (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-cli-symlink-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
