@@ -731,6 +731,21 @@ describe("no-output watchdog", () => {
     assert.equal(r.failureDetail, "insufficient_quota: out of credits");
   });
 
+  test("a structured error event that matches none of the three named buckets still gets a failureReason instead of null (opencode's own UnknownError class)", async () => {
+    const child = fakeChild(7203);
+    const mgr = makeManager({ spawnFn: () => child, killFn: () => {}, noOutputTimeoutMs: 60000, watchdogPollMs: 5 });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      JSON.stringify({ type: "error", error: { name: "UnknownError", data: { message: "Streaming response failed" } } }) + "\n"
+    );
+    await new Promise((r) => setTimeout(r, 40));
+    child.emit("exit", 1, null);
+    const r = mgr.result(dispatched.id, { fields: ["failureReason", "failureDetail"] });
+    assert.equal(r.failureReason, "opencode_unknownerror");
+    assert.equal(r.failureDetail, "Streaming response failed");
+  });
+
   test("the --fields validation error message includes failureDetail", () => {
     const child = fakeChild(7202);
     const mgr = makeManager({ spawnFn: () => child, killFn: () => {} });
