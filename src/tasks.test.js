@@ -286,6 +286,29 @@ describe("output-completeness check at settlement time (issue #35)", () => {
     assert.equal(activityEvent?.originSessionId, "sess-xyz");
   });
 
+  test("scheduleActivity emits an explicit failure marker instead of local narration when the summary model call fails", async () => {
+    const events = [];
+    const child = fakeChild();
+    const mgr = makeManager({
+      tasksFixture: [],
+      spawnFn: () => child,
+      listModelsFn: () => "openai/gpt-5.6-luna\n",
+      onEvent: (event) => events.push(event),
+    });
+    mgr.setActivitySummarySubscriptions(1);
+
+    mgr.dispatch({ prompt: "do the thing", directory: os.tmpdir() });
+    child.emit("exit", 0, null);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const activityEvents = events.filter((event) => event.type === "task.activity");
+    assert.ok(activityEvents.length >= 1, "expected at least one task.activity event");
+    const failed = activityEvents.find((event) => event.summaryFailed === true);
+    assert.ok(failed, "expected a task.activity event with summaryFailed: true");
+    assert.equal(failed.activity, undefined);
+    assert.match(failed.summaryError, /summary model is unavailable/);
+  });
+
   test("a clean done task with a final message is not flagged incomplete", () => {
     const child = fakeChild();
     const mgr = makeManager({ spawnFn: () => child });

@@ -565,27 +565,38 @@ export function createTaskManager({
     if (typeof onEvent !== "function" || task.internal) return;
     const scheduledStatus = task.status;
     const scheduledDirectory = task.directory;
-    void activityCache.refresh(task, { force }).then((result) => {
-      if (!result) return;
+    const baseEvent = () => ({
+      sequence: ++eventSequence,
+      type: "task.activity",
+      taskId: task.id,
+      directory: scheduledDirectory,
+      originSessionId: task.originSessionId ?? null,
+      status: scheduledStatus,
+      previousStatus: null,
+      occurredAt: new Date().toISOString(),
+    });
+    const emit = (/** @type {object} */ event) => {
       if (scheduledStatus === "running" && task.status !== scheduledStatus) return;
-      const event = {
-        sequence: ++eventSequence,
-        type: "task.activity",
-        taskId: task.id,
-        directory: scheduledDirectory,
-        originSessionId: task.originSessionId ?? null,
-        status: scheduledStatus,
-        previousStatus: null,
-        occurredAt: new Date().toISOString(),
-        activity: result.activity,
-        outputWatermark: result.outputWatermark,
-      };
       try {
         onEvent(event);
       } catch {
         // Activity is advisory and cannot interrupt task lifecycle.
       }
-    });
+    };
+    void activityCache.refresh(task, { force }).then(
+      /** @param {{activity: string, outputWatermark: number, cached: boolean}|null} result */ (result) => {
+        if (!result) return;
+        emit({ ...baseEvent(), activity: result.activity, outputWatermark: result.outputWatermark });
+      },
+      (err) => {
+        // A propagated summarizer failure (Task 4) must not become an
+        // unhandled rejection here, and must not be smoothed over with a
+        // retry or stale-narration substitution -- every failed tick
+        // reports failure, explicitly, so a --summaries subscriber can tell
+        // a real summary from a failed one.
+        emit({ ...baseEvent(), summaryFailed: true, summaryError: errMessage(err) });
+      }
+    );
   }
 
   function loadPersisted() {
