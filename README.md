@@ -93,8 +93,8 @@ taskferry --version
 ```
 
 `node src/cli.js setup` is the one-time bootstrap: it runs `npm install`
-in the checkout, then creates two managed symlinks — `~/.local/bin/taskferry`
-pointing at `src/cli.js`, and
+in the checkout, then creates three managed symlinks — `~/.local/bin/taskferry`
+pointing at `src/cli.js`, `~/.local/bin/tf-sl` pointing at `src/tf-sl.sh`, and
 `$XDG_CONFIG_HOME/opencode/plugins/taskferry.js` (default
 `~/.config/opencode/plugins/taskferry.js`) pointing at
 `src/opencode-plugin.js`. It also registers the native agent integration
@@ -104,6 +104,13 @@ is not yet on your `PATH`, the result tells you to add it:
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
+
+`tf-sl` renders the taskferry segment for a Claude Code statusline command:
+pipe the same JSON Claude Code feeds your statusline script into it, and it
+prints an ANSI-colored `tf: <id> <status>` (or a live activity summary, at
+narrow terminal widths) for whichever task is running in the current `cwd`,
+or nothing at all if none is. It's meant to be composed into a larger
+statusline script (`printf '%s' "$input" | tf-sl`), not run standalone.
 
 ### Updating an existing checkout
 

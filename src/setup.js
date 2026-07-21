@@ -6,6 +6,7 @@ import path from "node:path";
 const MANAGED_TARGETS = new Set([
   path.join("src", "cli.js"),
   path.join("src", "opencode-plugin.js"),
+  path.join("src", "tf-sl.sh"),
 ]);
 
 function isTaskferryCheckout(resolvedSource) {
@@ -235,8 +236,11 @@ export function runSetup({
     "taskferry.js",
   );
   const opencodeSource = path.join(checkoutDirectory, "src", "opencode-plugin.js");
+  const tfSlPath = path.join(homeDirectory, ".local", "bin", "tf-sl");
+  const tfSlSource = path.join(checkoutDirectory, "src", "tf-sl.sh");
   replaceManagedSymlink(binPath, cliPath);
   replaceManagedSymlink(opencodePath, opencodeSource);
+  replaceManagedSymlink(tfSlPath, tfSlSource);
 
   const binDirectory = path.dirname(binPath);
   const onPath = (env.PATH || "")
@@ -246,6 +250,7 @@ export function runSetup({
   return {
     cli: { path: binPath, source: cliPath },
     opencode: { path: opencodePath, source: opencodeSource },
+    statusline: { path: tfSlPath, source: tfSlSource },
     dependencies: "installed",
     path: onPath ? "available" : "missing",
     ...(onPath ? {} : { pathInstruction: 'export PATH="$HOME/.local/bin:$PATH"' }),
