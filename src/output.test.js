@@ -1,6 +1,6 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { formatWatchEvent, leanStatus } from "./output.js";
+import { colorize, formatWatchEvent, leanStatus } from "./output.js";
 
 function resumeHint(detail) {
   return leanStatus(detail).next;
@@ -101,5 +101,70 @@ describe("formatWatchEvent toon format for activity/state events", () => {
 
     assert.equal(line.split("\n").length, 1);
     assert.match(line, /Line one\. Line two\. Line three\./);
+  });
+});
+
+describe("colorize", () => {
+  test("wraps text in the color code and a reset when enabled", () => {
+    assert.equal(colorize("done", "\x1b[32m", true), "\x1b[32mdone\x1b[0m");
+  });
+
+  test("returns text unchanged when not enabled, e.g. output is piped or redirected", () => {
+    assert.equal(colorize("done", "\x1b[32m", false), "done");
+  });
+
+  test("returns text unchanged when there is no code for this status", () => {
+    assert.equal(colorize("unknown", null, true), "unknown");
+  });
+});
+
+describe("formatWatchEvent color (TTY-gated)", () => {
+  test("colors a done status when useColor is true", () => {
+    const line = formatWatchEvent({
+      type: "task.state",
+      taskId: "oc_1",
+      status: "done",
+      previousStatus: "running",
+      occurredAt: "2026-07-18T00:24:11.282Z",
+    }, "toon", true);
+
+    assert.ok(line.includes("running -> \x1b[32mdone\x1b[0m"));
+  });
+
+  test("emits no ANSI codes when useColor is false (piped/non-TTY output)", () => {
+    const line = formatWatchEvent({
+      type: "task.state",
+      taskId: "oc_1",
+      status: "done",
+      previousStatus: "running",
+      occurredAt: "2026-07-18T00:24:11.282Z",
+    }, "toon", false);
+
+    assert.ok(!line.includes("\x1b["));
+    assert.ok(line.includes("running -> done"));
+  });
+
+  test("emits no ANSI codes by default when useColor is omitted", () => {
+    const line = formatWatchEvent({
+      type: "task.activity",
+      taskId: "oc_1",
+      status: "crashed",
+      occurredAt: "2026-07-18T00:24:11.282Z",
+      activity: "boom",
+    }, "toon");
+
+    assert.ok(!line.includes("\x1b["));
+  });
+
+  test("never colors ndjson output even when useColor is true", () => {
+    const line = formatWatchEvent({
+      type: "task.state",
+      taskId: "oc_1",
+      status: "done",
+      previousStatus: "running",
+      occurredAt: "2026-07-18T00:24:11.282Z",
+    }, "ndjson", true);
+
+    assert.ok(!line.includes("\x1b["));
   });
 });

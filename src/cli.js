@@ -44,9 +44,11 @@ export async function runCli(argv = process.argv.slice(2), {
       writeToon(value, io);
       return { exitCode: 0, value };
     } catch (error) {
+      const { colorize } = await import("./output.js");
       const message = error instanceof Error ? error.message : String(error);
-      io.stderr.write(`error: ${message}\n`);
-      io.stderr.write("help: fix the reported dependency or filesystem problem, then rerun node src/cli.js setup\n");
+      const tty = io.stderr.isTTY;
+      io.stderr.write(`${colorize(`error: ${message}`, "\x1b[31m", tty)}\n`);
+      io.stderr.write(`${colorize("help: fix the reported dependency or filesystem problem, then rerun node src/cli.js setup", "\x1b[2m", tty)}\n`);
       return { exitCode: 1 };
     }
   }
