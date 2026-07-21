@@ -199,6 +199,12 @@ function formatActivityLine(event, useColor) {
       : status;
     return `${prefix}${event.taskId} ${transition}`;
   }
+  if (event.summaryFailed === true) {
+    const reason = typeof event.summaryError === "string" && event.summaryError
+      ? event.summaryError.replace(/[\r\n]+/g, " ")
+      : "unknown error";
+    return `${prefix}${event.taskId} ${status}: summary unavailable (${reason})`;
+  }
   const activity = typeof event.activity === "string" && event.activity
     ? event.activity.replace(/[\r\n]+/g, " ")
     : event.status;

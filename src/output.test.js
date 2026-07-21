@@ -102,6 +102,23 @@ describe("formatWatchEvent toon format for activity/state events", () => {
     assert.equal(line.split("\n").length, 1);
     assert.match(line, /Line one\. Line two\. Line three\./);
   });
+
+  test("shows a distinct message for a task.activity event carrying an explicit summarize failure", () => {
+    const line = formatWatchEvent({
+      type: "task.activity",
+      taskId: "oc_1",
+      status: "running",
+      occurredAt: "2026-07-18T00:06:12.414Z",
+      summaryFailed: true,
+      summaryError: "summary model is unavailable: opencode/hy3-free",
+    }, "toon");
+
+    assert.match(line, /oc_1/);
+    assert.match(line, /running/);
+    assert.match(line, /summary unavailable/);
+    assert.match(line, /summary model is unavailable/);
+    assert.equal(line.split("\n").length, 1);
+  });
 });
 
 describe("colorize", () => {
