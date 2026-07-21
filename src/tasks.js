@@ -302,7 +302,7 @@ const DEFAULT_ADVISOR_SESSION_TTL_MS = 30 * 60 * 1000;
 const DEFAULT_NO_OUTPUT_TIMEOUT_MS = 256000;
 const DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS = 400000;
 // TASKFERRY_WATCHDOG_POLL_MS is internal plumbing with no config-file
-// equivalent (see docs/superpowers/specs/2026-07-18-config-file-design.md),
+// equivalent (see .superpowers/.completed/specs/2026-07-18-config-file-design.md),
 // so this one constant keeps reading process.env directly.
 const DEFAULT_WATCHDOG_POLL_MS = positiveInteger(
   Number(process.env.TASKFERRY_WATCHDOG_POLL_MS),

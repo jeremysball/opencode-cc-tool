@@ -51,7 +51,7 @@ obviously belong to args parsing or output formatting, start there.
 | `state-lock.js` | 91 | `withFileLock()`: synchronous, `Atomics.wait`-based cross-process exclusive lock, used only for the daemon auto-start race. |
 | `output.js` | 174 | TOON encoding, `leanStatus`/`leanResult`/`projectList`/`homeView`, hint-string MCP-name migration. |
 | `opencode-plugin.js` | 174 | OpenCode's native plugin surface: toasts on task state transitions by polling `client.js` directly. |
-| `setup.js` | 210 | `taskferry setup`: npm install, managed symlinks, per-client integration registration (see `docs/superpowers/specs/2026-07-16-taskferry-setup-design.md`). |
+| `setup.js` | 210 | `taskferry setup`: npm install, managed symlinks, per-client integration registration (see `.superpowers/.completed/specs/2026-07-16-taskferry-setup-design.md`). |
 | `scripts/generate-skill.js` | — | Regenerates `integrations/*/skills/using-taskferry/SKILL.md` from `skills/using-taskferry/SKILL.md`; `--check` fails on drift. |
 
 Every `*.js` above has a co-located `*.test.js` (`node --test`, no
@@ -69,7 +69,7 @@ not part of the default `npm test`).
 | What does the daemon send to a summary model, how to disable it | `docs/security.md` |
 | Retired MCP tool names / flags | `docs/migrating-from-mcp.md` |
 | Per-agent (Claude Code/Codex/OpenCode) setup | `docs/integrations/*.md` |
-| Open design questions, past decisions | `docs/superpowers/specs/*.md`, `docs/superpowers/plans/*.md` |
+| Open design questions, past decisions | `.superpowers/specs/*.md`, `.superpowers/plans/*.md` (implemented ones move to `.superpowers/.completed/`) |
 | What's left to build, what's blocked, what's deliberately skipped | `todo.txt` (repo root) |
 | The canonical agent-facing skill (regenerate after any CLI-surface change) | `skills/using-taskferry/SKILL.md`, then `npm run skill:generate` |
 | User-tunable options via a JSON config file (as an alternative to env vars) | `docs/config.md` |
