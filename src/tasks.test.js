@@ -2378,8 +2378,7 @@ describe("summarize()", () => {
     assert.match(retrySnapshot.narration, /More work done/);
 
     // Drop a usable final message + sessionID into the retry's log so the
-    // activity-result we get back isn't summaryFailed. The retry's session
-    // id is what survives into the cache for the next call.
+    // retry's session id survives into the cache for the next call.
     const persisted = JSON.parse(fs.readFileSync(mgr.paths.TASKS_FILE, "utf8"));
     const retries = persisted.filter((t) => t.summaryOf && t.summaryOf.sourceTaskId === "source");
     assert.equal(retries.length, 2, "expected two summary tasks to have been queued");
@@ -2391,7 +2390,6 @@ describe("summarize()", () => {
     children[1].emit("exit", 0, null);
 
     const result = await refreshP;
-    assert.equal(result.summaryFailed, false);
     assert.equal(result.activity, "fresh retry output");
     // Cache ended up with the retry's session id (recorded by the exit
     // handler), not the stale ses_cached or the mismatched first attempt.

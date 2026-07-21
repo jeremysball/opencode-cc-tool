@@ -565,7 +565,7 @@ export function createTaskManager({
     if (typeof onEvent !== "function" || task.internal) return;
     const scheduledStatus = task.status;
     const scheduledDirectory = task.directory;
-    void activityCache.refresh(task, { force }).then(/** @param {{activity: string, outputWatermark: number, summaryFailed: boolean, cached: boolean}|null} result */ (result) => {
+    void activityCache.refresh(task, { force }).then((result) => {
       if (!result) return;
       if (scheduledStatus === "running" && task.status !== scheduledStatus) return;
       const event = {
@@ -947,7 +947,6 @@ export function createTaskManager({
       sourceStatus: source.status,
       activity: result.activity,
       outputWatermark: result.outputWatermark,
-      summaryFailed: result.summaryFailed,
     };
   }
 
