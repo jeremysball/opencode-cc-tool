@@ -265,7 +265,7 @@ test("doctor is a structured health check and --full preserves extra daemon fiel
   assert.equal(capture.output().value.socketPath, "/tmp/taskferry.sock");
   assert.deepEqual(capture.output().value.integrations, {
     claude: { installed: true },
-    mcpIsolation: { opencode: { checked: false, reason: "no opencode config with a playwright MCP entry found" }, claudeCode: { checked: false, reason: "~/.claude.json not found" } },
+    playwrightMcpIsolation: { opencode: { checked: false, reason: "no opencode config with a playwright MCP entry found" }, claudeCode: { checked: false, reason: "~/.claude.json not found" } },
   });
   assert.equal(capture.output().value.warnings, undefined);
   assert.deepEqual(calls, [{ method: "system.health", params: {} }]);
@@ -284,7 +284,7 @@ test("doctor surfaces a warning when the claude plugin is missing", async (t) =>
   assert.equal(result.exitCode, 0);
   assert.deepEqual(capture.output().value.integrations, {
     claude: { installed: false, reason: "claude CLI not found" },
-    mcpIsolation: { opencode: { checked: false, reason: "no opencode config with a playwright MCP entry found" }, claudeCode: { checked: false, reason: "~/.claude.json not found" } },
+    playwrightMcpIsolation: { opencode: { checked: false, reason: "no opencode config with a playwright MCP entry found" }, claudeCode: { checked: false, reason: "~/.claude.json not found" } },
   });
   assert.equal(capture.output().value.warnings.length, 1);
 });

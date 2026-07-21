@@ -182,7 +182,7 @@ export async function runCommand(command, options, { client, io = process, signa
       return {
         ...health,
         ...(options.full ? { cliVersion: "2.0.0", protocolVersion: 1 } : {}),
-        integrations: { claude, mcpIsolation: { opencode: opencodeMCP, claudeCode: claudeCodeMCP } },
+        integrations: { claude, playwrightMcpIsolation: { opencode: opencodeMCP, claudeCode: claudeCodeMCP } },
         ...(warnings.length ? { warnings } : {}),
       };
     }

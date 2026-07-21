@@ -579,7 +579,7 @@ test("runSetup repairs a non-isolated opencode.json", (t) => {
     mcp: { playwright: { command: ["npx", "@anthropic/mcp-server-playwright"] } },
   }));
   const result = runSetup({ ...fixture, runCommand: unavailableClients });
-  assert.deepEqual(result.mcpIsolation.opencode, { changed: true, path: path.join(configDir, "opencode.json") });
+  assert.deepEqual(result.playwrightMcpIsolation.opencode, { changed: true, path: path.join(configDir, "opencode.json") });
   const written = JSON.parse(fs.readFileSync(path.join(configDir, "opencode.json"), "utf8"));
   assert.ok(written.mcp.playwright.command.includes("--isolated"));
 });
@@ -592,8 +592,8 @@ test("runSetup repairs a non-isolated referenced Claude Code config file", (t) =
     mcpServers: { playwright: { args: ["npx", "@anthropic/mcp-server-playwright", "--config", configPath] } },
   }));
   const result = runSetup({ ...fixture, runCommand: unavailableClients });
-  assert.equal(result.mcpIsolation.claudeCode.changed, true);
-  assert.equal(result.mcpIsolation.claudeCode.path, configPath);
+  assert.equal(result.playwrightMcpIsolation.claudeCode.changed, true);
+  assert.equal(result.playwrightMcpIsolation.claudeCode.path, configPath);
   const written = JSON.parse(fs.readFileSync(configPath, "utf8"));
   assert.equal(written.browser.isolated, true);
 });
@@ -611,8 +611,8 @@ test("runSetup leaves an already-isolated setup untouched", (t) => {
     mcpServers: { playwright: { args: ["npx", "@anthropic/mcp-server-playwright", "--config", configPath] } },
   }));
   const result = runSetup({ ...fixture, runCommand: unavailableClients });
-  assert.equal(result.mcpIsolation.opencode.changed, false);
-  assert.equal(result.mcpIsolation.claudeCode.changed, false);
+  assert.equal(result.playwrightMcpIsolation.opencode.changed, false);
+  assert.equal(result.playwrightMcpIsolation.claudeCode.changed, false);
 });
 
 test("runSetup leaves a .jsonc-only setup untouched — asserts bytes unchanged", (t) => {

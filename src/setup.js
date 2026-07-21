@@ -263,6 +263,6 @@ export function runSetup({
       claude: installClaude(checkoutDirectory, runCommand, homeDirectory, env),
       codex: registerCodex(checkoutDirectory, runCommand),
     },
-    mcpIsolation: { opencode: opencodeMCP, claudeCode: claudeCodeMCP },
+    playwrightMcpIsolation: { opencode: opencodeMCP, claudeCode: claudeCodeMCP },
   };
 }

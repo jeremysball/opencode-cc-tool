@@ -430,7 +430,7 @@ test("doctor warns when the claude plugin is not installed", async (t) => {
 
   assert.deepEqual(result.integrations, {
     claude: { installed: false },
-    mcpIsolation: { opencode: { checked: false, reason: "no opencode config with a playwright MCP entry found" }, claudeCode: { checked: false, reason: "~/.claude.json not found" } },
+    playwrightMcpIsolation: { opencode: { checked: false, reason: "no opencode config with a playwright MCP entry found" }, claudeCode: { checked: false, reason: "~/.claude.json not found" } },
   });
   assert.equal(result.warnings.length, 1);
   assert.match(result.warnings[0], /claude-monitor notifications won't fire/);
@@ -456,7 +456,7 @@ test("doctor has no warnings when the claude plugin is installed", async (t) => 
 
   assert.deepEqual(result.integrations, {
     claude: { installed: true },
-    mcpIsolation: { opencode: { checked: false, reason: "no opencode config with a playwright MCP entry found" }, claudeCode: { checked: false, reason: "~/.claude.json not found" } },
+    playwrightMcpIsolation: { opencode: { checked: false, reason: "no opencode config with a playwright MCP entry found" }, claudeCode: { checked: false, reason: "~/.claude.json not found" } },
   });
   assert.equal(result.warnings, undefined);
 });
@@ -475,7 +475,7 @@ test("doctor reports the claude plugin as not installed when the claude CLI is m
 
   assert.deepEqual(result.integrations, {
     claude: { installed: false, reason: "claude CLI not found" },
-    mcpIsolation: { opencode: { checked: false, reason: "no opencode config with a playwright MCP entry found" }, claudeCode: { checked: false, reason: "~/.claude.json not found" } },
+    playwrightMcpIsolation: { opencode: { checked: false, reason: "no opencode config with a playwright MCP entry found" }, claudeCode: { checked: false, reason: "~/.claude.json not found" } },
   });
   assert.equal(result.warnings.length, 1);
 });
@@ -582,7 +582,7 @@ test("doctor reports a distinct reason when claude exits with a non-ENOENT spawn
 
   assert.deepEqual(result.integrations, {
     claude: { installed: false, reason: "claude plugin list failed: spawnSync claude EACCES" },
-    mcpIsolation: { opencode: { checked: false, reason: "no opencode config with a playwright MCP entry found" }, claudeCode: { checked: false, reason: "~/.claude.json not found" } },
+    playwrightMcpIsolation: { opencode: { checked: false, reason: "no opencode config with a playwright MCP entry found" }, claudeCode: { checked: false, reason: "~/.claude.json not found" } },
   });
   assert.equal(result.warnings.length, 1);
 });
@@ -610,8 +610,8 @@ test("doctor warns when opencode playwright MCP is checked and not isolated", as
   const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand });
 
   assert.deepEqual(result.integrations.claude, { installed: true });
-  assert.equal(result.integrations.mcpIsolation.opencode.checked, true);
-  assert.equal(result.integrations.mcpIsolation.opencode.isolated, false);
+  assert.equal(result.integrations.playwrightMcpIsolation.opencode.checked, true);
+  assert.equal(result.integrations.playwrightMcpIsolation.opencode.isolated, false);
   assert.equal(result.warnings.length, 1);
   assert.match(result.warnings[0], /Playwright MCP for opencode is not isolated/);
   assert.match(result.warnings[0], /SIGKILL/);
@@ -639,8 +639,8 @@ test("doctor warns when claude code playwright MCP is checked and not isolated",
 
   const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand });
 
-  assert.equal(result.integrations.mcpIsolation.claudeCode.checked, true);
-  assert.equal(result.integrations.mcpIsolation.claudeCode.isolated, false);
+  assert.equal(result.integrations.playwrightMcpIsolation.claudeCode.checked, true);
+  assert.equal(result.integrations.playwrightMcpIsolation.claudeCode.isolated, false);
   const mcpWarning = result.warnings.find((w) => w.includes("Claude Code"));
   assert.notEqual(mcpWarning, undefined);
   assert.match(mcpWarning, /Playwright MCP for Claude Code is not isolated/);
@@ -665,11 +665,11 @@ test("doctor emits no MCP warning when checked: false for both sides", async (t)
   const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand });
 
   assert.equal(result.warnings, undefined);
-  assert.equal(result.integrations.mcpIsolation.opencode.checked, false);
-  assert.equal(result.integrations.mcpIsolation.claudeCode.checked, false);
+  assert.equal(result.integrations.playwrightMcpIsolation.opencode.checked, false);
+  assert.equal(result.integrations.playwrightMcpIsolation.claudeCode.checked, false);
 });
 
-test("doctor integrations.mcpIsolation shape is present when both sides are isolated", async (t) => {
+test("doctor integrations.playwrightMcpIsolation shape is present when both sides are isolated", async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
   const configDir = path.join(home, ".config", "opencode");
@@ -697,8 +697,8 @@ test("doctor integrations.mcpIsolation shape is present when both sides are isol
   const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand });
 
   assert.equal(result.warnings, undefined);
-  assert.equal(result.integrations.mcpIsolation.opencode.checked, true);
-  assert.equal(result.integrations.mcpIsolation.opencode.isolated, true);
-  assert.equal(result.integrations.mcpIsolation.claudeCode.checked, true);
-  assert.equal(result.integrations.mcpIsolation.claudeCode.isolated, true);
+  assert.equal(result.integrations.playwrightMcpIsolation.opencode.checked, true);
+  assert.equal(result.integrations.playwrightMcpIsolation.opencode.isolated, true);
+  assert.equal(result.integrations.playwrightMcpIsolation.claudeCode.checked, true);
+  assert.equal(result.integrations.playwrightMcpIsolation.claudeCode.isolated, true);
 });
