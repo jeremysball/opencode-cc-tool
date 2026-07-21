@@ -13,6 +13,7 @@ function makeFixture(t) {
   fs.writeFileSync(path.join(checkout, "package.json"), JSON.stringify({ name: "taskferry" }));
   fs.writeFileSync(path.join(src, "cli.js"), "export {};\n");
   fs.writeFileSync(path.join(src, "opencode-plugin.js"), "export {};\n");
+  fs.writeFileSync(path.join(src, "tf-sl.sh"), "#!/usr/bin/env bash\n");
   t.after(() => {
     fs.rmSync(home, { recursive: true, force: true });
     fs.rmSync(checkout, { recursive: true, force: true });
@@ -21,6 +22,7 @@ function makeFixture(t) {
     checkoutDirectory: checkout,
     cliPath: path.join(src, "cli.js"),
     opencodeSourcePath: path.join(src, "opencode-plugin.js"),
+    tfSlSourcePath: path.join(src, "tf-sl.sh"),
     homeDirectory: home,
   };
 }
@@ -128,7 +130,7 @@ function gitFailsAlreadyInstalledClients(command, args) {
   throw new Error(`unexpected client command: ${command} ${args.join(" ")}`);
 }
 
-test("installs dependencies, the CLI, and the OpenCode plugin", (t) => {
+test("installs dependencies, the CLI, the OpenCode plugin, and the statusline script", (t) => {
   const fixture = makeFixture(t);
   const npmCalls = [];
   const commandCalls = [];
@@ -143,6 +145,7 @@ test("installs dependencies, the CLI, and the OpenCode plugin", (t) => {
   assert.deepEqual(npmCalls, [fixture.checkoutDirectory]);
   assert.equal(fs.realpathSync(result.cli.path), fixture.cliPath);
   assert.equal(fs.realpathSync(result.opencode.path), fixture.opencodeSourcePath);
+  assert.equal(fs.realpathSync(result.statusline.path), fixture.tfSlSourcePath);
   assert.equal(result.path, "available");
   assert.deepEqual(result.integrations, {
     claude: { status: "unavailable" },
@@ -202,8 +205,10 @@ test("rerun replaces the existing managed symlinks without throwing", (t) => {
 
   assert.equal(fs.realpathSync(second.cli.path), fixture.cliPath);
   assert.equal(fs.realpathSync(second.opencode.path), fixture.opencodeSourcePath);
+  assert.equal(fs.realpathSync(second.statusline.path), fixture.tfSlSourcePath);
   assert.equal(second.cli.path, first.cli.path);
   assert.equal(second.opencode.path, first.opencode.path);
+  assert.equal(second.statusline.path, first.statusline.path);
 });
 
 test("first install writes the hash state file", (t) => {
