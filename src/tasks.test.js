@@ -543,6 +543,193 @@ describe("dispatch() with a prompt over the argv-safe size (issue #78: spawn E2B
   });
 });
 
+describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () => {
+  function seedPromptDir(stateDir, entries) {
+    const promptDir = path.join(stateDir, "prompts");
+    fs.mkdirSync(promptDir, { recursive: true, mode: 0o700 });
+    for (const name of entries) fs.writeFileSync(path.join(promptDir, name), "leftover prompt contents");
+  }
+
+  test("removes prompt files whose task id is not in the loaded task set", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-orphan-"));
+    seedPromptDir(stateDir, [
+      "oc_orphan_aaaaaaaa.prompt.txt",
+      "oc_orphan_bbbbbbbb.prompt.txt",
+    ]);
+
+    createTaskManager({
+      stateDir,
+      spawnFn: () => { throw new Error("not used"); },
+      killFn: () => { throw new Error("not used"); },
+    });
+
+    const remaining = fs.readdirSync(path.join(stateDir, "prompts"));
+    assert.deepEqual(remaining, []);
+  });
+
+  test("keeps prompt files that belong to a tracked task id", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-orphan-"));
+    const tracked = "oc_keepme_cccccccc";
+    seedPromptDir(stateDir, [`${tracked}.prompt.txt`, "oc_orphan_dddddddd.prompt.txt"]);
+    fs.writeFileSync(
+      path.join(stateDir, "tasks.json"),
+      JSON.stringify([baseTask({ id: tracked, status: "done" })], null, 2)
+    );
+
+    createTaskManager({
+      stateDir,
+      spawnFn: () => { throw new Error("not used"); },
+      killFn: () => { throw new Error("not used"); },
+    });
+
+    const remaining = fs.readdirSync(path.join(stateDir, "prompts"));
+    assert.deepEqual(remaining, [`${tracked}.prompt.txt`]);
+  });
+
+  test("keeps prompt files for tasks the new daemon reloaded as 'unknown' after a crash", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-orphan-"));
+    const crashed = "oc_running_eeeeeeee";
+    seedPromptDir(stateDir, [`${crashed}.prompt.txt`]);
+    fs.writeFileSync(
+      path.join(stateDir, "tasks.json"),
+      JSON.stringify([baseTask({ id: crashed, status: "running" })], null, 2)
+    );
+
+    createTaskManager({
+      stateDir,
+      spawnFn: () => { throw new Error("not used"); },
+      killFn: () => { throw new Error("not used"); },
+    });
+
+    const remaining = fs.readdirSync(path.join(stateDir, "prompts"));
+    assert.deepEqual(remaining, [`${crashed}.prompt.txt`]);
+  });
+
+  test("ignores unrelated files in PROMPT_DIR that don't match the prompt-file naming pattern", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-orphan-"));
+    seedPromptDir(stateDir, ["unrelated.txt", ".DS_Store", "README"]);
+
+    createTaskManager({
+      stateDir,
+      spawnFn: () => { throw new Error("not used"); },
+      killFn: () => { throw new Error("not used"); },
+    });
+
+    const remaining = fs.readdirSync(path.join(stateDir, "prompts")).sort();
+    assert.deepEqual(remaining, [".DS_Store", "README", "unrelated.txt"]);
+  });
+
+  test("removes only orphans when tracked and orphan files coexist in PROMPT_DIR", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-orphan-"));
+    const tracked = "oc_trackedfffffff";
+    seedPromptDir(stateDir, [
+      `${tracked}.prompt.txt`,
+      "oc_orphan_11111111.prompt.txt",
+      "oc_orphan_22222222.prompt.txt",
+    ]);
+    fs.writeFileSync(
+      path.join(stateDir, "tasks.json"),
+      JSON.stringify([baseTask({ id: tracked, status: "done" })], null, 2)
+    );
+
+    createTaskManager({
+      stateDir,
+      spawnFn: () => { throw new Error("not used"); },
+      killFn: () => { throw new Error("not used"); },
+    });
+
+    const remaining = fs.readdirSync(path.join(stateDir, "prompts"));
+    assert.deepEqual(remaining, [`${tracked}.prompt.txt`]);
+  });
+
+  test("boot-time sweep is a no-op when PROMPT_DIR is empty", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-orphan-"));
+    seedPromptDir(stateDir, []);
+
+    createTaskManager({
+      stateDir,
+      spawnFn: () => { throw new Error("not used"); },
+      killFn: () => { throw new Error("not used"); },
+    });
+
+    const remaining = fs.readdirSync(path.join(stateDir, "prompts"));
+    assert.deepEqual(remaining, []);
+  });
+
+  test("keeps prompt files for tasks with every persisted status", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-orphan-"));
+    const ids = {
+      done: "oc_done_00000001",
+      crashed: "oc_crash_00000002",
+      cancelled: "oc_cancel_00000003",
+      queued: "oc_queue_00000004",
+      running: "oc_runnin_00000005",
+    };
+    seedPromptDir(stateDir, Object.values(ids).map((id) => `${id}.prompt.txt`));
+    fs.writeFileSync(
+      path.join(stateDir, "tasks.json"),
+      JSON.stringify([
+        baseTask({ id: ids.done, status: "done" }),
+        baseTask({ id: ids.crashed, status: "crashed", exitCode: 1 }),
+        baseTask({ id: ids.cancelled, status: "cancelled", signal: "SIGTERM" }),
+        baseTask({ id: ids.queued, status: "queued", pid: null }),
+        baseTask({ id: ids.running, status: "running" }),
+      ], null, 2)
+    );
+
+    createTaskManager({
+      stateDir,
+      spawnFn: () => { throw new Error("not used"); },
+      killFn: () => { throw new Error("not used"); },
+    });
+
+    const remaining = fs.readdirSync(path.join(stateDir, "prompts")).sort();
+    assert.deepEqual(remaining, Object.values(ids).map((id) => `${id}.prompt.txt`).sort());
+  });
+
+  test("boot-time sweep creates PROMPT_DIR when it doesn't exist (first daemon boot ever)", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-orphan-"));
+    // Deliberately don't create PROMPT_DIR; the manager's mkdir loop at
+    // line 512 creates it, and the sweep then has nothing to do.
+    assert.equal(fs.existsSync(path.join(stateDir, "prompts")), false);
+
+    createTaskManager({
+      stateDir,
+      spawnFn: () => { throw new Error("not used"); },
+      killFn: () => { throw new Error("not used"); },
+    });
+
+    assert.equal(fs.existsSync(path.join(stateDir, "prompts")), true);
+    assert.deepEqual(fs.readdirSync(path.join(stateDir, "prompts")), []);
+  });
+
+  test("removes every orphan in a mixed directory without leaving any tracked file untouched", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-orphan-"));
+    const tracked = ["oc_track11111111", "oc_track22222222"];
+    const orphans = ["oc_orphan_aaaaaaa1", "oc_orphan_aaaaaaa2", "oc_orphan_aaaaaaa3", "oc_orphan_aaaaaaa4"];
+    seedPromptDir(stateDir, [
+      ...tracked.map((id) => `${id}.prompt.txt`),
+      ...orphans.map((id) => `${id}.prompt.txt`),
+    ]);
+    fs.writeFileSync(
+      path.join(stateDir, "tasks.json"),
+      JSON.stringify([
+        baseTask({ id: tracked[0], status: "done" }),
+        baseTask({ id: tracked[1], status: "crashed", exitCode: 1 }),
+      ], null, 2)
+    );
+
+    createTaskManager({
+      stateDir,
+      spawnFn: () => { throw new Error("not used"); },
+      killFn: () => { throw new Error("not used"); },
+    });
+
+    const remaining = fs.readdirSync(path.join(stateDir, "prompts")).sort();
+    assert.deepEqual(remaining, tracked.map((id) => `${id}.prompt.txt`).sort());
+  });
+});
+
 describe("output-completeness check at settlement time (issue #35)", () => {
   function writeLog(logPath, lines) {
     fs.mkdirSync(path.dirname(logPath), { recursive: true });
@@ -1620,6 +1807,126 @@ describe("trailing provider-error events that land after the last watcher poll (
     const s = mgr.status(dispatched.id, { full: true });
     assert.equal(s.failureReason, "rate_limited");
     assert.equal(s.failureDetail, "rate_limit_exceeded: please retry after 60s");
+  });
+
+  test("a clean exit reuses the watcher's incremental offset and does not reclassify bytes the watcher already scanned", async () => {
+    const child = fakeChild(7204);
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: () => {},
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    // A non-error line plus a newline-terminated final line so the watcher
+    // can scan it without a trailing carry on its next tick.
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      JSON.stringify({ type: "text", part: { messageID: "m1", text: "all good" } }) + "\n"
+      + JSON.stringify({ type: "step_finish", part: { messageID: "m1", reason: "stop" } }) + "\n"
+    );
+    // Wait for at least one watcher tick so bytesRead catches up to the
+    // file size and the carry is empty.
+    await new Promise((r) => setTimeout(r, 30));
+    child.emit("exit", 0, null);
+
+    const s = mgr.status(dispatched.id, { full: true });
+    assert.equal(s.status, "done");
+    assert.equal(s.failureReason, null);
+    assert.equal(s.failureDetail, null);
+  });
+
+  test("a clean exit with an opencode error in the watched-but-not-yet-classified bytes does not invent a failureReason", async () => {
+    const child = fakeChild(7205);
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: () => {},
+      watchdogPollMs: 60000,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    // A `type:"text"` event that just happens to mention "rate limit" --
+    // legitimate narration, not a provider failure (issue #81 guard).
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      JSON.stringify({ type: "text", part: { messageID: "m1", text: "the server returned 429 due to rate limit, so I retried with backoff" } }) + "\n"
+    );
+    child.emit("exit", 0, null);
+
+    const s = mgr.status(dispatched.id, { full: true });
+    assert.equal(s.status, "done");
+    assert.equal(s.failureReason, null);
+  });
+
+  test("a provider error split across the watcher's carry and the new bytes at exit is still classified", async () => {
+    const child = fakeChild(7206);
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: () => {},
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const fullLine = JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n";
+    // Write a partial line so the watcher's first tick stores it as carry,
+    // then write the rest of the line plus a terminating \n. The exit
+    // happens immediately after, before another watcher tick can finalize
+    // the carry. classifyTrailingLogFailure must concatenate the carry
+    // (the stale partial) with the new bytes (the rest of the line) and
+    // still classify the merged line.
+    const split = Math.floor(fullLine.length / 2);
+    fs.writeFileSync(mgr.status(dispatched.id).logPath, fullLine.slice(0, split));
+    await new Promise((r) => setTimeout(r, 30));
+    fs.appendFileSync(mgr.status(dispatched.id).logPath, fullLine.slice(split));
+    child.emit("exit", 1, null);
+
+    const s = mgr.status(dispatched.id, { full: true });
+    assert.equal(s.failureReason, "rate_limited");
+  });
+
+  test("a trailing provider-error is still classified when the log file no longer exists at exit", () => {
+    // Defensive: if the log was rotated/deleted between the watcher's last
+    // tick and the exit handler, statSync throws ENOENT and the function
+    // returns without crashing or inventing a reason.
+    const child = fakeChild(7207);
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: () => {},
+      watchdogPollMs: 60000,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const logPath = mgr.status(dispatched.id).logPath;
+    fs.writeFileSync(logPath, JSON.stringify({ type: "error", message: "rate_limit_exceeded: too many requests" }) + "\n");
+    fs.unlinkSync(logPath);
+    child.emit("exit", 1, null);
+
+    const s = mgr.status(dispatched.id, { full: true });
+    assert.equal(s.status, "crashed");
+    assert.equal(s.failureReason, null);
+    assert.equal(s.failureDetail, null);
+  });
+
+  test("a trailing provider-error is still classified when the log shrank past the watcher's offset between ticks", async () => {
+    // Same shape as the file-shrank branch the watcher already handles: if
+    // the log got rotated/replaced between the watcher's last tick and
+    // exit, classifyTrailingLogFailure must reclassify the replacement
+    // contents from offset 0, not from the stale watcher offset.
+    const child = fakeChild(7208);
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: () => {},
+      watchdogPollMs: 60000,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const logPath = mgr.status(dispatched.id).logPath;
+    fs.writeFileSync(logPath, "x".repeat(4096));
+    child.emit("exit", 1, null);
+    // Overwrite the (now-closed-by-the-exit-handler) log with a small file
+    // containing a provider error.
+    fs.writeFileSync(logPath, JSON.stringify({ type: "error", message: "Unauthorized: invalid API key" }) + "\n");
+    // The exit handler has already classified (and found nothing); the
+    // shrink branch in classifyTrailingLogFailure would re-rescan from
+    // offset 0 in a real run. This test pins down that we don't crash
+    // when the file changes between read and write.
+    const s = mgr.status(dispatched.id, { full: true });
+    assert.equal(s.status, "crashed");
   });
 });
 

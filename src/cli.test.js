@@ -152,6 +152,8 @@ test("dispatch --prompt - rejects with a usage error and never contacts the daem
   assert.equal(result.exitCode, 2);
   assert.equal(connected, false);
   assert.match(capture.output().value.error, /stdin/i);
+  assert.match(capture.output().value.help, /Pipe a prompt into the command/);
+  assert.match(capture.output().value.help, /taskferry dispatch --prompt -/);
 });
 
 test("dispatch --prompt - rejects with a usage error when piped stdin is empty", async () => {
@@ -168,6 +170,93 @@ test("dispatch --prompt - rejects with a usage error when piped stdin is empty",
   assert.equal(result.exitCode, 2);
   assert.equal(connected, false);
   assert.match(capture.output().value.error, /empty/i);
+  assert.match(capture.output().value.help, /Pipe a prompt into the command/);
+});
+
+test("advisor --prompt - surfaces the same actionable help, with the advisor command name, when stdin is a TTY", async () => {
+  const capture = capturedIo({ stdin: fakeTtyStdin() });
+  const result = await runCli(["advisor", "--prompt", "-", "--model", "opencode/some-model"], {
+    io: capture.io,
+    connectClient: async () => {
+      throw new Error("must not connect");
+    },
+  });
+
+  assert.equal(result.exitCode, 2);
+  assert.match(capture.output().value.help, /Pipe a prompt into the command/);
+  assert.match(capture.output().value.help, /taskferry advisor --prompt -/);
+});
+
+test("dispatch --prompt - strips a CRLF terminator from piped stdin (Windows-originated files)", async () => {
+  const capture = capturedIo({ stdin: fakePipedStdin("prompt with CRLF terminator\r\n") });
+  const { client, calls } = fakeClient({
+    "task.dispatch": { id: "oc_1", status: "queued" },
+  });
+  const result = await runCli(["dispatch", "--prompt", "-"], {
+    io: capture.io,
+    connectClient: async () => client,
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(calls[0].params.prompt, "prompt with CRLF terminator");
+});
+
+test("dispatch --prompt - surfaces a multi-word help sentence, not just the bare command name (regression for help: dispatch)", async () => {
+  const capture = capturedIo({ stdin: fakeTtyStdin() });
+  await runCli(["dispatch", "--prompt", "-"], {
+    io: capture.io,
+    connectClient: async () => { throw new Error("must not connect"); },
+  });
+
+  const help = capture.output().value.help;
+  assert.notEqual(help, "dispatch");
+  assert.notEqual(help, "advisor");
+  assert.match(help, /taskferry dispatch/);
+  assert.ok(help.length > 8, "help must be a real sentence, not a bare token");
+});
+
+test("dispatch --prompt - with no trailing terminator still surfaces the prompt verbatim (no spurious stripping)", async () => {
+  const capture = capturedIo({ stdin: fakePipedStdin("prompt without trailing newline") });
+  const { client, calls } = fakeClient({
+    "task.dispatch": { id: "oc_1", status: "queued" },
+  });
+  const result = await runCli(["dispatch", "--prompt", "-"], {
+    io: capture.io,
+    connectClient: async () => client,
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(calls[0].params.prompt, "prompt without trailing newline");
+});
+
+test("dispatch --prompt - treats CRLF-only piped content as empty (matches the LF-only empty path)", async () => {
+  let connected = false;
+  const capture = capturedIo({ stdin: fakePipedStdin("\r\n") });
+  const result = await runCli(["dispatch", "--prompt", "-"], {
+    io: capture.io,
+    connectClient: async () => {
+      connected = true;
+      throw new Error("must not connect");
+    },
+  });
+
+  assert.equal(result.exitCode, 2);
+  assert.equal(connected, false);
+  assert.match(capture.output().value.error, /empty/i);
+});
+
+test("dispatch --prompt - keeps an interior CRLF in the prompt (only strips the trailing terminator)", async () => {
+  const capture = capturedIo({ stdin: fakePipedStdin("line one\r\nline two\r\n") });
+  const { client, calls } = fakeClient({
+    "task.dispatch": { id: "oc_1", status: "queued" },
+  });
+  const result = await runCli(["dispatch", "--prompt", "-"], {
+    io: capture.io,
+    connectClient: async () => client,
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(calls[0].params.prompt, "line one\r\nline two");
 });
 
 test("no arguments show executable, description, workspace tasks, counts, and next actions", async () => {
