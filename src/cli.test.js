@@ -278,7 +278,10 @@ test("doctor surfaces a warning when the claude plugin is missing", async (t) =>
   const { client } = fakeClient({
     "system.health": { healthy: true, pid: 123 },
   });
-  const runShellCommand = () => ({ status: null, stdout: "", stderr: "", error: { code: "ENOENT" } });
+  const runShellCommand = (command) => {
+    if (command === "bwrap") return { status: 0, stdout: "bubblewrap 0.11.2\n", stderr: "", error: undefined };
+    return { status: null, stdout: "", stderr: "", error: { code: "ENOENT" } };
+  };
   const result = await runCli(["doctor"], { io: capture.io, connectClient: async () => client, runShellCommand, homeDirectory: home, env: {} });
 
   assert.equal(result.exitCode, 0);

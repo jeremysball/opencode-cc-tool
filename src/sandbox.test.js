@@ -1,0 +1,159 @@
+import { describe, test } from "node:test";
+import assert from "node:assert/strict";
+import path from "node:path";
+import { buildBwrapArgs, checkBwrapAvailable, platformSupportsSandbox } from "./sandbox.js";
+
+describe("platformSupportsSandbox()", () => {
+  test("is true on linux", () => {
+    assert.equal(platformSupportsSandbox("linux"), true);
+  });
+
+  test("is false on darwin", () => {
+    assert.equal(platformSupportsSandbox("darwin"), false);
+  });
+
+  test("is false on win32", () => {
+    assert.equal(platformSupportsSandbox("win32"), false);
+  });
+
+  test("defaults to process.platform when no argument is given", () => {
+    assert.equal(platformSupportsSandbox(), process.platform === "linux");
+  });
+});
+
+describe("checkBwrapAvailable()", () => {
+  test("reports available when the probe exits 0", () => {
+    const runCommand = (command, args) => {
+      assert.equal(command, "bwrap");
+      assert.deepEqual(args, ["--version"]);
+      return { status: 0, stdout: "bubblewrap 0.11.2\n", stderr: "", error: undefined };
+    };
+    assert.deepEqual(checkBwrapAvailable(runCommand), { checked: true, available: true });
+  });
+
+  test("reports unavailable with an ENOENT-derived reason when the binary is missing", () => {
+    const runCommand = () => ({ status: null, stdout: "", stderr: "", error: { code: "ENOENT" } });
+    const result = checkBwrapAvailable(runCommand);
+    assert.equal(result.checked, true);
+    assert.equal(result.available, false);
+    assert.match(result.reason, /bwrap not found/);
+  });
+
+  test("reports unavailable with the spawn error message for a non-ENOENT error", () => {
+    const runCommand = () => ({ status: null, stdout: "", stderr: "", error: { code: "EACCES", message: "spawnSync bwrap EACCES" } });
+    const result = checkBwrapAvailable(runCommand);
+    assert.equal(result.available, false);
+    assert.match(result.reason, /EACCES/);
+  });
+
+  test("reports unavailable when the probe exits non-zero with no spawn error", () => {
+    const runCommand = () => ({ status: 1, stdout: "", stderr: "boom", error: undefined });
+    const result = checkBwrapAvailable(runCommand);
+    assert.equal(result.available, false);
+    assert.match(result.reason, /status 1/);
+  });
+});
+
+describe("buildBwrapArgs()", () => {
+  test("orders ro-bind, then /proc+/dev+/tmp scaffolding, then deny-list tmpfs, then read-write binds, then standard flags", () => {
+    const args = buildBwrapArgs({
+      directory: "/workspace/my-repo",
+      stateDir: "/home/user/.local/state/taskferry",
+      runtimeDir: "/home/user/.local/state/taskferry/run",
+      homeDir: "/home/user",
+    });
+
+    assert.deepEqual(args.slice(0, 3), ["--ro-bind", "/", "/"]);
+    // /proc, /dev, and /tmp must be mounted before the deny-list and the
+    // read-write binds below: bwrap applies mounts in argument order, and a
+    // later mount on a parent directory (e.g. /tmp) shadows an earlier one
+    // nested inside it. Any deny-list entry or bind path that happens to
+    // live under /tmp must not be silently hidden by a /tmp mount that
+    // comes after it.
+    assert.deepEqual(args.slice(3, 9), ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]);
+
+    const deniedPaths = [
+      "/home/user/.local/state/taskferry",
+      path.join("/home/user", ".ssh"),
+      path.join("/home/user", ".aws"),
+      path.join("/home/user", ".config", "gcloud"),
+      path.join("/home/user", ".config", "gh"),
+      path.join("/home/user", ".gnupg"),
+    ];
+    for (const denied of deniedPaths) {
+      const index = args.indexOf(denied);
+      assert.notEqual(index, -1, `expected ${denied} to be tmpfs-denied`);
+      assert.equal(args[index - 1], "--tmpfs");
+      assert.ok(index > 8, `expected ${denied} to be denied after the /proc+/dev+/tmp scaffolding`);
+    }
+
+    // The state dir's tmpfs deny must come before the runtime dir's read-write
+    // bind, since runtimeDir is nested under stateDir in the default layout
+    // and bwrap applies rules in argument order.
+    const stateDirTmpfsIndex = args.indexOf("/home/user/.local/state/taskferry");
+    const runtimeDirBindIndex = args.lastIndexOf("/home/user/.local/state/taskferry/run");
+    assert.ok(stateDirTmpfsIndex < runtimeDirBindIndex);
+    assert.equal(args[runtimeDirBindIndex - 1], "/home/user/.local/state/taskferry/run");
+    assert.equal(args[runtimeDirBindIndex - 2], "--bind");
+
+    const directoryBindIndex = args.lastIndexOf("/workspace/my-repo");
+    assert.equal(args[directoryBindIndex - 1], "/workspace/my-repo");
+    assert.equal(args[directoryBindIndex - 2], "--bind");
+    // The read-write binds must be the very last mounts, so they win over
+    // every other mount above regardless of path nesting.
+    assert.ok(directoryBindIndex < runtimeDirBindIndex);
+
+    assert.deepEqual(args.slice(-3), ["--unshare-all", "--share-net", "--die-with-parent"]);
+  });
+
+  test("accepts an injected denyList override", () => {
+    const args = buildBwrapArgs({
+      directory: "/workspace/my-repo",
+      stateDir: "/state",
+      runtimeDir: "/state/run",
+      homeDir: "/home/user",
+      denyList: ["/only/this/path"],
+    });
+    assert.equal(args[9], "--tmpfs");
+    assert.equal(args[10], "/only/this/path");
+    assert.equal(args.indexOf("/home/user/.ssh"), -1);
+  });
+
+  test("binds a directory and runtimeDir nested under /tmp after the /tmp tmpfs, so the fresh /tmp mount doesn't shadow them", () => {
+    const args = buildBwrapArgs({
+      directory: "/tmp/my-scratch-repo",
+      stateDir: "/home/user/.local/state/taskferry",
+      runtimeDir: "/tmp/taskferry-runtime",
+      homeDir: "/home/user",
+    });
+
+    const tmpTmpfsIndex = args.indexOf("--tmpfs");
+    assert.equal(args[tmpTmpfsIndex + 1], "/tmp");
+
+    const directoryBindIndex = args.indexOf("--bind", tmpTmpfsIndex);
+    assert.equal(args[directoryBindIndex + 1], "/tmp/my-scratch-repo");
+    assert.ok(directoryBindIndex > tmpTmpfsIndex);
+
+    const runtimeDirBindIndex = args.lastIndexOf("--bind");
+    assert.equal(args[runtimeDirBindIndex + 1], "/tmp/taskferry-runtime");
+    assert.ok(runtimeDirBindIndex > tmpTmpfsIndex);
+  });
+
+  test("appends extraRoBinds after the read-write binds, so a specific file wins over a broader writable parent", () => {
+    const args = buildBwrapArgs({
+      directory: "/workspace/my-repo",
+      stateDir: "/home/user/.local/state/taskferry",
+      runtimeDir: "/home/user/.local/state/taskferry/run",
+      homeDir: "/home/user",
+      extraRoBinds: [["/home/user/.local/share/opencode/auth.json", "/home/user/.local/state/taskferry/run/opencode-data/opencode/auth.json"]],
+    });
+
+    const runtimeDirBindIndex = args.lastIndexOf("/home/user/.local/state/taskferry/run");
+    const roBindIndex = args.indexOf("--ro-bind", runtimeDirBindIndex);
+    assert.notEqual(roBindIndex, -1);
+    assert.equal(args[roBindIndex + 1], "/home/user/.local/share/opencode/auth.json");
+    assert.equal(args[roBindIndex + 2], "/home/user/.local/state/taskferry/run/opencode-data/opencode/auth.json");
+    assert.ok(roBindIndex > runtimeDirBindIndex);
+    assert.deepEqual(args.slice(-3), ["--unshare-all", "--share-net", "--die-with-parent"]);
+  });
+});
