@@ -458,6 +458,30 @@ describe("bwrap sandboxing", () => {
     assert.equal(calls, 1);
   });
 
+  test("ro-binds PROMPT_DIR when an oversized prompt is attached inside the sandbox", () => {
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+    });
+    const prompt = "x".repeat(96 * 1024 + 1);
+
+    mgr.dispatch({ prompt, directory: os.tmpdir() });
+
+    assert.equal(captured.cmd, "bwrap");
+    const attachment = captured.args[captured.args.indexOf("-f") + 1];
+    const promptDir = path.join(mgr.paths.STATE_DIR, "prompts");
+    assert.equal(path.dirname(attachment), promptDir);
+    const promptBindIndex = captured.args.findIndex(
+      (arg, index) => arg === "--ro-bind"
+        && captured.args[index + 1] === promptDir
+        && captured.args[index + 2] === promptDir
+    );
+    assert.notEqual(promptBindIndex, -1, "expected PROMPT_DIR to be restored read-only after stateDir is masked");
+  });
+
   test("wraps a summary launch's spawn in bwrap too, binding SUMMARY_DIR", async () => {
     let captured;
     const child = fakeChild();
@@ -567,7 +591,7 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
     assert.deepEqual(remaining, []);
   });
 
-  test("keeps prompt files that belong to a tracked task id", () => {
+  test("removes prompt files that belong to a tracked terminal task", () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-orphan-"));
     const tracked = "oc_keepme_cccccccc";
     seedPromptDir(stateDir, [`${tracked}.prompt.txt`, "oc_orphan_dddddddd.prompt.txt"]);
@@ -583,16 +607,16 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
     });
 
     const remaining = fs.readdirSync(path.join(stateDir, "prompts"));
-    assert.deepEqual(remaining, [`${tracked}.prompt.txt`]);
+    assert.deepEqual(remaining, []);
   });
 
-  test("keeps prompt files for tasks the new daemon reloaded as 'unknown' after a crash", () => {
+  test("removes prompt files for persisted tasks already marked 'unknown' after a crash", () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-orphan-"));
     const crashed = "oc_running_eeeeeeee";
     seedPromptDir(stateDir, [`${crashed}.prompt.txt`]);
     fs.writeFileSync(
       path.join(stateDir, "tasks.json"),
-      JSON.stringify([baseTask({ id: crashed, status: "running" })], null, 2)
+      JSON.stringify([baseTask({ id: crashed, status: "unknown" })], null, 2)
     );
 
     createTaskManager({
@@ -602,7 +626,7 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
     });
 
     const remaining = fs.readdirSync(path.join(stateDir, "prompts"));
-    assert.deepEqual(remaining, [`${crashed}.prompt.txt`]);
+    assert.deepEqual(remaining, []);
   });
 
   test("ignores unrelated files in PROMPT_DIR that don't match the prompt-file naming pattern", () => {
@@ -619,7 +643,7 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
     assert.deepEqual(remaining, [".DS_Store", "README", "unrelated.txt"]);
   });
 
-  test("removes only orphans when tracked and orphan files coexist in PROMPT_DIR", () => {
+  test("removes prompt files for both orphaned and tracked terminal tasks", () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-orphan-"));
     const tracked = "oc_trackedfffffff";
     seedPromptDir(stateDir, [
@@ -639,7 +663,7 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
     });
 
     const remaining = fs.readdirSync(path.join(stateDir, "prompts"));
-    assert.deepEqual(remaining, [`${tracked}.prompt.txt`]);
+    assert.deepEqual(remaining, []);
   });
 
   test("boot-time sweep is a no-op when PROMPT_DIR is empty", () => {
@@ -656,7 +680,7 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
     assert.deepEqual(remaining, []);
   });
 
-  test("keeps prompt files for tasks with every persisted status", () => {
+  test("removes prompt files for every persisted status after running and queued reload as unknown", () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-orphan-"));
     const ids = {
       done: "oc_done_00000001",
@@ -684,7 +708,7 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
     });
 
     const remaining = fs.readdirSync(path.join(stateDir, "prompts")).sort();
-    assert.deepEqual(remaining, Object.values(ids).map((id) => `${id}.prompt.txt`).sort());
+    assert.deepEqual(remaining, []);
   });
 
   test("boot-time sweep creates PROMPT_DIR when it doesn't exist (first daemon boot ever)", () => {
@@ -703,7 +727,7 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
     assert.deepEqual(fs.readdirSync(path.join(stateDir, "prompts")), []);
   });
 
-  test("removes every orphan in a mixed directory without leaving any tracked file untouched", () => {
+  test("removes every scratch prompt from a mixed orphaned and tracked terminal directory", () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-orphan-"));
     const tracked = ["oc_track11111111", "oc_track22222222"];
     const orphans = ["oc_orphan_aaaaaaa1", "oc_orphan_aaaaaaa2", "oc_orphan_aaaaaaa3", "oc_orphan_aaaaaaa4"];
@@ -726,7 +750,7 @@ describe("boot-time sweep of orphaned prompt scratch files in PROMPT_DIR", () =>
     });
 
     const remaining = fs.readdirSync(path.join(stateDir, "prompts")).sort();
-    assert.deepEqual(remaining, tracked.map((id) => `${id}.prompt.txt`).sort());
+    assert.deepEqual(remaining, []);
   });
 });
 
@@ -1833,6 +1857,37 @@ describe("trailing provider-error events that land after the last watcher poll (
     assert.equal(s.status, "done");
     assert.equal(s.failureReason, null);
     assert.equal(s.failureDetail, null);
+  });
+
+  test("settlement reads only the trailing delta after the watcher's accumulated offset", async (t) => {
+    const child = fakeChild(7209);
+    const readCalls = [];
+    const originalReadSync = fs.readSync;
+    t.mock.method(fs, "readSync", (fd, buffer, offset, length, position) => {
+      readCalls.push({ length, position });
+      return originalReadSync(fd, buffer, offset, length, position);
+    });
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: () => {},
+      noOutputTimeoutMs: 60000,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    const logPath = mgr.status(dispatched.id).logPath;
+    const prefix = JSON.stringify({ type: "text", part: { messageID: "m1", text: "x".repeat(4096) } }) + "\n";
+    fs.writeFileSync(logPath, prefix);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const prefixBytes = Buffer.byteLength(prefix);
+    assert.ok(readCalls.some((call) => call.position === 0 && call.length === prefixBytes));
+    readCalls.length = 0;
+
+    const trailing = JSON.stringify({ type: "error", message: "usage_limit_exceeded: monthly quota reached" }) + "\n";
+    fs.appendFileSync(logPath, trailing);
+    child.emit("exit", 1, null);
+
+    assert.deepEqual(readCalls, [{ length: Buffer.byteLength(trailing), position: prefixBytes }]);
+    assert.equal(mgr.status(dispatched.id).failureReason, "rate_limited");
   });
 
   test("a clean exit with an opencode error in the watched-but-not-yet-classified bytes does not invent a failureReason", async () => {

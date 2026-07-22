@@ -686,8 +686,8 @@ export function createTaskManager({
   // `${task.id}.prompt.txt` (mode 0o600) and removes it from the task's own
   // exit/error paths -- but a SIGKILL of the daemon mid-task skips both
   // cleanup paths and orphans the file forever. Anything in PROMPT_DIR that
-  // doesn't belong to a currently-tracked task id is leftover from such a
-  // crash; deleting it at boot keeps the directory from accumulating
+  // doesn't belong to a task this process can still run is leftover from such
+  // a crash; deleting it at boot keeps the directory from accumulating
   // unread prompt contents across restarts.
   function sweepOrphanedPromptFiles() {
     let entries;
@@ -699,7 +699,8 @@ export function createTaskManager({
     for (const entry of entries) {
       if (!entry.endsWith(".prompt.txt")) continue;
       const taskId = entry.slice(0, -".prompt.txt".length);
-      if (tasks.has(taskId)) continue;
+      const task = tasks.get(taskId);
+      if (task?.status === "running" || task?.status === "queued") continue;
       try {
         fs.unlinkSync(path.join(PROMPT_DIR, entry));
       } catch (err) {
@@ -1433,9 +1434,12 @@ export function createTaskManager({
         // needs a stored key for and reports the model as unknown. Pin it
         // read-only into the fresh data home so credentials stay visible
         // without making the whole real data directory writable.
-        const extraRoBinds = existsFn(realAuthFile)
-          ? /** @type {[string, string][]} */ ([[realAuthFile, path.join(sandboxedDataHome, "opencode", "auth.json")]])
-          : [];
+        /** @type {[string, string][]} */
+        const extraRoBinds = [];
+        if (existsFn(realAuthFile)) {
+          extraRoBinds.push([realAuthFile, path.join(sandboxedDataHome, "opencode", "auth.json")]);
+        }
+        if (promptFilePath) extraRoBinds.push([PROMPT_DIR, PROMPT_DIR]);
         spawnArgs = buildBwrapArgs({ directory: launchDirectory, stateDir, runtimeDir, homeDir, denyList, extraRoBinds }).concat(["--", "opencode", ...args]);
         spawnEnv = { ...spawnEnv, XDG_DATA_HOME: sandboxedDataHome };
       }
@@ -1468,7 +1472,6 @@ export function createTaskManager({
       };
 
       child.on("exit", (code, signal) => {
-        stopRunningWatcher(task.id);
         if (settled) return;
         settled = true;
         const timer = escalationTimers.get(task.id);
@@ -1477,6 +1480,7 @@ export function createTaskManager({
           escalationTimers.delete(task.id);
         }
         classifyTrailingLogFailure(task);
+        stopRunningWatcher(task.id);
         // A watchdog-killed child (task.failureReason already set) can still exit
         // 0/unsignaled if it traps SIGTERM and shuts down gracefully -- don't let
         // that read as "done" and bury the failureReason behind a healthy status.
@@ -1648,11 +1652,9 @@ export function createTaskManager({
   }
 
   // classifyProviderFailure() only ever runs from the watcher's interval
-  // tick, and stopRunningWatcher() (called first in both the 'exit' and
-  // 'error' handlers) is a bare clearInterval with no final read. A
-  // provider-error event that lands after the last tick but before/at
-  // process exit was therefore never classified and silently lost the
-  // failureReason (issue #81). Rather than re-read the whole log from
+  // tick, so a provider-error event that lands after the last tick but
+  // before/at process exit would otherwise never be classified and silently
+  // lose the failureReason (issue #81). Rather than re-read the whole log from
   // scratch (the cost startRunningWatcher's incremental byte-offset
   // reader exists to avoid), only the bytes the watcher hadn't seen yet
   // are read here, concatenated with whatever partial line the watcher
