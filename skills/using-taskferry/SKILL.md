@@ -59,6 +59,33 @@ and burns wall-clock time versus just doing it.
 - Wait for settlement, retrieve the result, handle crashes, and validate the
   worker's deliverables yourself.
 
+## Verifying A Worker's Claimed Commit
+
+A worker's final `Status:` line and narration are not evidence a commit
+happened — only `git log`/`git status` against the actual worktree is. After
+every settled implementer/fixer dispatch, before treating the task as done:
+
+```sh
+git -C "<worktree>" log --oneline origin/main..HEAD
+git -C "<worktree>" status --short
+```
+
+If commits exist and their stated summary is plausible, you're done. If the
+worktree shows uncommitted changes (or nothing at all) despite a `Status:
+DONE` claim describing a commit, don't re-dispatch reflexively — first check
+whether the diff on disk actually matches what the worker described. If it
+does, the implementation itself is real and only the git step failed (a
+sandboxed worker's `git commit` can fail silently for reasons invisible to
+its own narration, e.g. a broken or read-only git-dir mount in its
+environment); verify tests and lint yourself, then commit it directly rather
+than throwing away completed work. Only re-dispatch when the diff itself is
+missing, wrong, or incomplete.
+
+This generalizes past just commits: any deliverable a worker claims to have
+produced (a written file, a pushed branch, a passed test run) is a claim to
+verify independently, not to accept on narration alone — a confident,
+detailed self-report is exactly as unverified as a terse one.
+
 ## Choosing a Model
 
 See `picking-a-model` for the full tier breakdown (cheapest/standard/
