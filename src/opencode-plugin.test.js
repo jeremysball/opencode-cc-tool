@@ -209,6 +209,7 @@ test("sets TASKFERRY_CHILD for dispatch and summary children", async () => {
   const children = [];
   const manager = createTaskManager({
     stateDir,
+    sandboxEnabled: false,
     spawnFn: (_command, _args, options) => {
       const child = fakeChild(5000 + children.length + 1);
       children.push({ child, options });

@@ -13,7 +13,7 @@ import { createTaskManager, summaryAgentDeniedBash } from "./tasks.js";
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, onEvent } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, runtimeDir, platform, onEvent } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -30,6 +30,11 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     killFn: killFn ?? (() => { throw new Error("killFn was not injected for this test"); }),
     listModelsFn: listModelsFn ?? (() => "opencode/hy3-free\n"),
     verifySummaryAgentFn: verifySummaryAgentFn ?? (async () => {}),
+    sandboxEnabled,
+    ...(checkBwrapAvailableFn != null ? { checkBwrapAvailableFn } : {}),
+    ...(existsFn != null ? { existsFn } : {}),
+    ...(runtimeDir != null ? { runtimeDir } : {}),
+    ...(platform != null ? { platform } : {}),
     ...(onEvent != null ? { onEvent } : {}),
     ...(maxDispatchesPerWindow != null ? { maxDispatchesPerWindow } : {}),
     ...(dispatchWindowMs != null ? { dispatchWindowMs } : {}),
@@ -83,11 +88,13 @@ describe("persistTask() durability across concurrent manager instances", () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
     const mgrA = createTaskManager({
       stateDir,
+      sandboxEnabled: false,
       spawnFn: () => fakeChild(1001),
       killFn: () => { throw new Error("not used"); },
     });
     const mgrB = createTaskManager({
       stateDir,
+      sandboxEnabled: false,
       spawnFn: () => fakeChild(1002),
       killFn: () => { throw new Error("not used"); },
     });
@@ -103,7 +110,7 @@ describe("persistTask() durability across concurrent manager instances", () => {
   test("malformed tasks.json surfaces as a structured error instead of throwing at construction", () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
     fs.writeFileSync(path.join(stateDir, "tasks.json"), "{ not valid json");
-    const mgr = createTaskManager({ stateDir, spawnFn: () => fakeChild(), killFn: () => {} });
+    const mgr = createTaskManager({ stateDir, sandboxEnabled: false, spawnFn: () => fakeChild(), killFn: () => {} });
     assert.throws(
       () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir() }),
       /error: could not read persisted task state/
@@ -263,6 +270,217 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     assert.equal(settled.status, "crashed");
     const full = mgr.result(dispatched.id);
     assert.equal(full.spawnError, "spawn opencode ENOENT");
+  });
+});
+
+describe("bwrap sandboxing", () => {
+  test("wraps the spawn command in bwrap when sandboxing is enabled and available", () => {
+    let captured = null;
+    const runtimeDir = path.join(os.tmpdir(), "axi-tasks-runtime");
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      runtimeDir,
+    });
+
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), model: "opencode-go/minimax-m3", variant: "max" });
+
+    assert.equal(captured.cmd, "bwrap");
+    assert.deepEqual(captured.args.slice(0, 3), ["--ro-bind", "/", "/"]);
+    assert.deepEqual(captured.args.slice(3, 9), ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]);
+    assert.ok(captured.args.includes(mgr.paths.STATE_DIR));
+    const bindIndex = captured.args.indexOf("--bind");
+    assert.equal(captured.args[bindIndex + 1], os.tmpdir());
+    assert.ok(captured.args.includes(runtimeDir));
+    assert.deepEqual(captured.args.slice(-14), [
+      "--", "opencode", "run", "--dir", os.tmpdir(), "--auto", "--format", "json",
+      "-m", "opencode-go/minimax-m3", "--variant", "max", "--", "hello",
+    ]);
+    assert.equal(captured.opts.cwd, os.tmpdir());
+  });
+
+  test("drops deny-list paths that don't exist on disk, since bwrap's --tmpfs fails on a missing mount point", () => {
+    let captured = null;
+    const missing = path.join(os.homedir(), ".aws");
+    const present = path.join(os.homedir(), ".ssh");
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      existsFn: (p) => p !== missing,
+      platform: "linux",
+    });
+
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+
+    assert.equal(captured.args.includes(missing), false);
+    assert.equal(captured.args.includes(present), true);
+  });
+
+  test("points XDG_DATA_HOME at a writable spot under runtimeDir when sandboxing, so opencode's own log/session db isn't blocked by the read-only root", () => {
+    let captured = null;
+    const runtimeDir = path.join(os.tmpdir(), "axi-tasks-runtime");
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      runtimeDir,
+    });
+
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+
+    assert.equal(captured.opts.env.XDG_DATA_HOME, path.join(runtimeDir, "opencode-data"));
+  });
+
+  test("ro-binds the real opencode auth.json into the sandboxed XDG_DATA_HOME when it exists, so credentialed providers still resolve", () => {
+    let captured = null;
+    const runtimeDir = path.join(os.tmpdir(), "axi-tasks-runtime");
+    const realAuthFile = path.join(os.homedir(), ".local", "share", "opencode", "auth.json");
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      existsFn: (p) => p === realAuthFile,
+      platform: "linux",
+      runtimeDir,
+    });
+
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+
+    const srcIndex = captured.args.indexOf(realAuthFile);
+    assert.notEqual(srcIndex, -1);
+    assert.equal(captured.args[srcIndex - 1], "--ro-bind");
+    assert.equal(captured.args[srcIndex + 1], path.join(runtimeDir, "opencode-data", "opencode", "auth.json"));
+  });
+
+  test("omits the auth.json ro-bind when the real file doesn't exist on disk", () => {
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      existsFn: () => false,
+      platform: "linux",
+    });
+
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+
+    // "--ro-bind" still appears once, for the base "/" root bind — only the
+    // extra auth.json bind (with its "opencode-data" destination) is absent.
+    assert.equal(captured.args.some((arg) => typeof arg === "string" && arg.includes("opencode-data")), false);
+  });
+
+  test("leaves XDG_DATA_HOME untouched when sandboxing is disabled", () => {
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: false,
+      platform: "linux",
+    });
+
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+
+    assert.equal(captured.opts.env.XDG_DATA_HOME, undefined);
+  });
+
+  test("falls through to the unwrapped opencode command when --no-sandbox is set on a dispatch", () => {
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => { throw new Error("checkBwrapAvailableFn should not be called when --no-sandbox is set"); },
+      platform: "linux",
+    });
+
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), noSandbox: true });
+
+    assert.equal(captured.cmd, "opencode");
+  });
+
+  test("falls through to the unwrapped opencode command when sandboxEnabled is false", () => {
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: false,
+      checkBwrapAvailableFn: () => { throw new Error("checkBwrapAvailableFn should not be called when sandboxEnabled is false"); },
+      platform: "linux",
+    });
+
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+
+    assert.equal(captured.cmd, "opencode");
+  });
+
+  test("falls through to the unwrapped opencode command on a non-Linux platform without probing bwrap", () => {
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => { throw new Error("checkBwrapAvailableFn should not be called on a non-Linux platform"); },
+      platform: "darwin",
+    });
+
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+
+    assert.equal(captured.cmd, "opencode");
+  });
+
+  test("crashes the task with a matching spawnError when bwrap is required but unavailable", () => {
+    const mgr = makeManager({
+      spawnFn: () => { throw new Error("spawnFn should not be called when bwrap is unavailable"); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: false, reason: "bwrap not found" }),
+      platform: "linux",
+    });
+
+    const dispatched = mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+    const status = mgr.status(dispatched.id);
+
+    assert.equal(status.status, "crashed");
+    assert.match(status.spawnError, /bwrap is required for sandboxing but was not found/);
+  });
+
+  test("checks bwrap availability only once across multiple dispatches", () => {
+    let calls = 0;
+    const mgr = makeManager({
+      spawnFn: () => fakeChild(),
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => { calls++; return { checked: true, available: true }; },
+      platform: "linux",
+    });
+
+    mgr.dispatch({ prompt: "one", directory: os.tmpdir() });
+    mgr.dispatch({ prompt: "two", directory: os.tmpdir() });
+
+    assert.equal(calls, 1);
+  });
+
+  test("wraps a summary launch's spawn in bwrap too, binding SUMMARY_DIR", async () => {
+    let captured;
+    const child = fakeChild();
+    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Investigated the issue" } });
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
+      logs: { "source.ndjson": log },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      spawnFn: (command, args, options) => { captured = { command, args, options }; return child; },
+      verifySummaryAgentFn: async () => {},
+    });
+
+    await mgr.summarize("source", { maxWords: 150 });
+
+    assert.equal(captured.command, "bwrap");
+    assert.ok(captured.args.includes("--agent"));
+    assert.equal(captured.options.cwd, mgr.paths.SUMMARY_DIR);
+    const bindIndex = captured.args.indexOf("--bind");
+    assert.equal(captured.args[bindIndex + 1], mgr.paths.SUMMARY_DIR);
+
+    child.emit("exit", 0, null);
   });
 });
 
@@ -472,6 +690,7 @@ describe("output-completeness check at settlement time (issue #35)", () => {
 
     const mgr1 = createTaskManager({
       stateDir,
+      sandboxEnabled: false,
       spawnFn: () => child,
       killFn: () => {},
       listModelsFn: () => "opencode/hy3-free\n",
@@ -492,6 +711,7 @@ describe("output-completeness check at settlement time (issue #35)", () => {
 
     const mgr2 = createTaskManager({
       stateDir,
+      sandboxEnabled: false,
       spawnFn: () => { throw new Error("not used"); },
       killFn: () => {},
       listModelsFn: () => "opencode/hy3-free\n",
@@ -634,6 +854,7 @@ describe("active-task concurrency cap (regressions)", () => {
     const killCalls = [];
     const mgr = createTaskManager({
       stateDir,
+      sandboxEnabled: false,
       maxConcurrentTasks: 1,
       maxDispatchesPerWindow: 10,
       dispatchWindowMs: 60000,
@@ -678,6 +899,7 @@ describe("config file precedence (maxConcurrentTasks)", () => {
     });
     const manager = createTaskManager({
       stateDir,
+      sandboxEnabled: false,
       spawnFn: () => {
         const child = fakeChild();
         children.push(child);
@@ -2230,6 +2452,7 @@ describe("summarize()", () => {
     const child = fakeChild();
     const mgr = createTaskManager({
       stateDir,
+      sandboxEnabled: false,
       spawnFn: () => child,
       killFn: () => {},
     });

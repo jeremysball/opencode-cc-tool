@@ -12,11 +12,13 @@ const commandSpecs = {
       "--session-id <id>": "resume an existing OpenCode session",
       "--key-slot <name>": "use a configured provider key slot",
       "--require-final-marker <regex>": "flag the task as incomplete if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics)",
+      "--no-sandbox": "run this dispatch without the bwrap filesystem sandbox (default: sandboxed on Linux)",
     },
     examples: [
       'taskferry dispatch --prompt "Fix the failing tests"',
       'taskferry dispatch --prompt "Review this change" --model openai/gpt-5.6-sol',
       'taskferry dispatch --prompt "Investigate" --require-final-marker "^Status: (DONE|DONE_WITH_CONCERNS|BLOCKED)$"',
+      'taskferry dispatch --prompt "Run one-off shell tooling" --no-sandbox',
     ],
   },
   cancel: {
@@ -228,7 +230,7 @@ function parseFields(value) {
 function defaultOptions(command, cwd) {
   switch (command) {
     case "dispatch":
-      return { prompt: undefined, directory: cwd, model: undefined, variant: undefined, sessionId: undefined, keySlot: undefined, finalMarker: undefined };
+      return { prompt: undefined, directory: cwd, model: undefined, variant: undefined, sessionId: undefined, keySlot: undefined, finalMarker: undefined, noSandbox: false };
     case "advisor":
       return { prompt: undefined, model: undefined, directory: cwd, variant: undefined, sessionId: undefined, timeoutMs: undefined };
     case "cancel":
@@ -315,11 +317,13 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       "--wait": ["summary"],
       "--summaries": ["watch"],
       "--summarize": ["wait"],
+      "--no-sandbox": ["dispatch"],
     };
+    const booleanKeyOverrides = { "--no-sandbox": "noSandbox" };
     if (booleanCommands[name]) {
       if (!booleanCommands[name].includes(command)) throw usageError(`unknown flag ${name} for \`${command}\``, command);
       if (inlineValue !== undefined) throw usageError(`${name} does not take a value`, command);
-      const key = name.slice(2);
+      const key = booleanKeyOverrides[name] ?? name.slice(2);
       setOption(options, key, true, command, seen);
       continue;
     }

@@ -18,6 +18,7 @@ const CONFIG_FIELD_TYPES = {
   providerKeyEnv: "string",
   summaryKeySlot: "string",
   summaryProviderKeyEnv: "string",
+  sandboxEnabled: "boolean",
 };
 
 /**

@@ -83,4 +83,16 @@ describe("loadConfig()", () => {
     const configPath = writeConfig(dir, '{"__proto__": null}');
     assert.throws(() => loadConfig({ configPath }), /error: unrecognized config key "__proto__".*\nhelp:/s);
   });
+
+  test("accepts a valid sandboxEnabled value", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ sandboxEnabled: false }));
+    assert.deepEqual(loadConfig({ configPath }), { sandboxEnabled: false });
+  });
+
+  test("rejects a wrong-typed sandboxEnabled value", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ sandboxEnabled: "false" }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "sandboxEnabled".*must be a boolean.*\nhelp:/s);
+  });
 });

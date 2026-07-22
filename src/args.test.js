@@ -28,6 +28,7 @@ test("parses dispatch and applies its argument defaults", () => {
       sessionId: undefined,
       keySlot: undefined,
       finalMarker: undefined,
+      noSandbox: false,
     },
     help: false,
   });
@@ -234,4 +235,10 @@ test("parses dispatch --require-final-marker and rejects invalid regex sources",
   );
   assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--require-final-marker"]), /requires a value/);
   assert.throws(() => parseArgs(["wait", "oc_1", "--require-final-marker", "foo"]), /unknown flag --require-final-marker/);
+});
+
+test("parses dispatch --no-sandbox", () => {
+  assert.equal(parseArgs(["dispatch", "--prompt", "x", "--no-sandbox"]).options.noSandbox, true);
+  assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--no-sandbox=1"]), /--no-sandbox does not take a value/);
+  assert.throws(() => parseArgs(["wait", "oc_1", "--no-sandbox"]), /unknown flag --no-sandbox/);
 });

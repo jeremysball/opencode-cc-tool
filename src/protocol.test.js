@@ -97,6 +97,23 @@ describe("private daemon protocol", () => {
     })), /invalid params/i);
   });
 
+  test("task.dispatch accepts an optional noSandbox boolean", () => {
+    const parsed = parseRequestLine(request("task.dispatch", {
+      prompt: "hi",
+      directory: "/tmp/project",
+      noSandbox: true,
+    }));
+    assert.equal(parsed.params.noSandbox, true);
+  });
+
+  test("task.dispatch rejects a non-boolean noSandbox", () => {
+    assert.throws(() => parseRequestLine(request("task.dispatch", {
+      prompt: "hi",
+      directory: "/tmp/project",
+      noSandbox: "true",
+    })), /invalid params/i);
+  });
+
   test("event.subscribe accepts an optional originSessionId string", () => {
     const parsed = parseRequestLine(request("event.subscribe", {
       directory: "/tmp/project",
