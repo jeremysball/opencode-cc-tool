@@ -100,6 +100,7 @@ Vars marked "config.json" also have a config-file equivalent — see
 | `TASKFERRY_SUMMARIZER_TIMEOUT_MS` | `360000` (6 min) | yes | Throttle between activity-summary model calls |
 | `TASKFERRY_ACTIVITY_MAX_WORDS` | `75` | yes | Max words in an activity-style summary |
 | `TASKFERRY_ADVISOR_SESSION_TTL_MS` | `1800000` (30 min) | yes | Advisor session idle expiry before auto-reset |
+| `TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS` | `900000` (15 min) | no | Default timeout for `wait` and `summary --wait`; set to `0` to disable |
 | `TASKFERRY_CHILD` | — | no | Set on the daemon's own spawned children; see `docs/security.md` |
 
 ## Things that look like bugs but aren't
@@ -107,9 +108,10 @@ Vars marked "config.json" also have a config-file equivalent — see
 - `status: "unknown"` after a daemon restart — expected; see
   `docs/daemon.md#recovery`. There is deliberately no re-attachment to
   already-running child processes.
-- `taskferry wait` blocking forever with no output — expected when
-  `--timeout-ms` is omitted (shipped 2026-07-17); it blocks until the
-  task's real exit event, not a hidden clamp.
+- `taskferry wait` returning with `status: "running"` and a `note` about
+  timing out — expected when the 15-minute default timeout (or an explicit
+  `--timeout-ms`) elapses before the task settles; re-run `taskferry wait`
+  to keep polling or pass `--timeout-ms` for a longer cap.
 - A `SKILL.md` edit not showing up in `integrations/claude/skills/...` —
   run `npm run skill:generate`; the distributed copies are generated, not
   hand-edited.
