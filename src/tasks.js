@@ -86,7 +86,7 @@ import { buildBwrapArgs, checkBwrapAvailable, defaultDenyList, platformSupportsS
  */
 
 /**
- * @typedef {TaskSummary & Partial<LogActivity> & {outputTail?: string, outputTailTotalChars?: number, outputTailTruncated?: boolean, next?: string}} TaskStatus
+ * @typedef {TaskSummary & Partial<LogActivity> & {outputTail?: string, outputTailTotalChars?: number, outputTailTruncated?: boolean, timedOut?: boolean, next?: string}} TaskStatus
  */
 
 /**
@@ -1903,12 +1903,13 @@ export function createTaskManager({
         const current = /** @type {Task} */ (tasks.get(taskId));
         const summary = summarize(current);
         if (!timedOut || current.status !== "running" || tailChars == null) {
-          resolve(summary);
+          resolve(timedOut ? { ...summary, timedOut: true } : summary);
           return;
         }
         const output = readNarration(current.logPath);
         resolve({
           ...summary,
+          timedOut: true,
           outputTail: output.slice(-tailChars),
           outputTailTotalChars: output.length,
           outputTailTruncated: output.length > tailChars,

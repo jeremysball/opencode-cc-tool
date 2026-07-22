@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -76,6 +76,18 @@ export function defaultRunCommand(command, args) {
     stderr: result.stderr || "",
     error: result.error,
   };
+}
+
+export function defaultRunCommandAsync(command, args) {
+  return new Promise((resolve) => {
+    execFile(command, args, { encoding: "utf8", timeout: 5000 }, (error, stdout, stderr) => {
+      if (error) {
+        resolve({ status: null, stdout: stdout || "", stderr: stderr || "", error });
+        return;
+      }
+      resolve({ status: 0, stdout: stdout || "", stderr: stderr || "", error: undefined });
+    });
+  });
 }
 
 function ensureSuccess(result, command, args) {
