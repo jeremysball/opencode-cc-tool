@@ -148,6 +148,21 @@ Every dispatched OpenCode child, and every summary child, runs wrapped in
 - **Deny-list is fixed** in this version — no config override. It covers
   taskferry's own state dir plus the standard credential locations; a
   config override can be added later if a real need surfaces.
+- **`XDG_DATA_HOME` is redirected.** OpenCode writes its own logs, session
+  database, and snapshots under `XDG_DATA_HOME` (`~/.local/share` by
+  default), which is read-only inside the sandbox. Sandboxed dispatches get
+  `XDG_DATA_HOME` pointed at `<runtimeDir>/opencode-data` instead — a
+  writable location under the same `runtimeDir` bind used for the daemon
+  socket. This is a separate store from the host's real data home: a
+  session started outside the sandbox can't be resumed inside it (or vice
+  versa), and `--continue`/`--session <id>` resolve against whichever data
+  home the current dispatch is using.
+- **Credential visibility.** Provider credentials normally live in
+  `auth.json` under the real `XDG_DATA_HOME`, so redirecting it would
+  otherwise hide every stored credential from the sandboxed process. To keep
+  credentialed providers working, the real `auth.json` (and only that file,
+  not the rest of the real data home) is ro-bound read-only into the
+  sandboxed data home when it exists on disk.
 - **Fail-fast on Linux.** If sandboxing is enabled (the default) and `bwrap`
   is not installed, dispatch fails immediately with a `crashed` task and a
   matching `spawnError` — there is no silent unsandboxed fallback on the
