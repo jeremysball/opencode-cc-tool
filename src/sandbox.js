@@ -42,6 +42,26 @@ export function checkBwrapAvailable(runCommand = defaultRunCommand) {
 }
 
 /**
+ * Async variant of checkBwrapAvailable for use with async runCommand implementations.
+ * @param {(command: string, args: readonly string[]) => Promise<{status: number|null, stdout: string, stderr: string, error?: NodeJS.ErrnoException}>} runCommand
+ * @returns {Promise<{checked: boolean, available: boolean, reason?: string}>}
+ */
+export async function checkBwrapAvailableAsync(runCommand) {
+  const result = await runCommand("bwrap", ["--version"]);
+  if (result.error) {
+    return {
+      checked: true,
+      available: false,
+      reason: result.error.code === "ENOENT" ? "bwrap not found" : `bwrap --version failed: ${result.error.message}`,
+    };
+  }
+  if (result.status !== 0) {
+    return { checked: true, available: false, reason: `bwrap --version exited with status ${result.status}` };
+  }
+  return { checked: true, available: true };
+}
+
+/**
  * The fixed v1 deny-list. Callers building a real bwrap invocation must
  * filter out entries that don't exist on disk before passing this to
  * buildBwrapArgs() — bwrap's --tmpfs fails if the mount point doesn't

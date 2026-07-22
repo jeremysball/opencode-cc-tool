@@ -10,17 +10,17 @@ import {
   projectContext,
   projectList,
 } from "./output.js";
-import { defaultRunCommand as defaultShellRunner, pluginInstalled } from "./setup.js";
+import { defaultRunCommandAsync as defaultShellRunner, pluginInstalled } from "./setup.js";
 import { checkClaudeCodePlaywrightIsolation, checkOpencodePlaywrightIsolation } from "./mcp-isolation.js";
-import { checkBwrapAvailable } from "./sandbox.js";
+import { checkBwrapAvailableAsync } from "./sandbox.js";
 
 // Checked from `doctor` so a missing Claude plugin install surfaces as an
 // explicit warning instead of silent absence: without it, `claude-monitor`
 // notifications (see docs/cli-reference.md) never fire and nothing else says
 // why. `runShellCommand` is injected (default: a real `claude` invocation) so
 // tests can stub it without spawning a subprocess.
-function checkClaudeIntegration(runShellCommand) {
-  const probe = runShellCommand("claude", ["plugin", "list", "--json"]);
+async function checkClaudeIntegration(runShellCommand) {
+  const probe = await runShellCommand("claude", ["plugin", "list", "--json"]);
   if (probe.error) {
     return probe.error.code === "ENOENT"
       ? { installed: false, reason: "claude CLI not found" }
@@ -167,11 +167,18 @@ export async function runCommand(command, options, { client, io = process, signa
       return contextForHook(projectContext(context), options.format);
     }
     case "doctor": {
-      const health = await client.request("system.health", {});
-      const claude = checkClaudeIntegration(runShellCommand);
-      const opencodeMCP = checkOpencodePlaywrightIsolation(homeDirectory, env);
-      const claudeCodeMCP = checkClaudeCodePlaywrightIsolation(homeDirectory);
-      const bwrap = platform === "linux" ? checkBwrapAvailable(runShellCommand) : null;
+      const checks = await Promise.allSettled([
+        client.request("system.health", {}),
+        checkClaudeIntegration(runShellCommand),
+        checkOpencodePlaywrightIsolation(homeDirectory, env),
+        checkClaudeCodePlaywrightIsolation(homeDirectory),
+        platform === "linux" ? checkBwrapAvailableAsync(runShellCommand) : Promise.resolve(null),
+      ]);
+      const health = checks[0].status === "fulfilled" ? checks[0].value : {};
+      const claude = checks[1].status === "fulfilled" ? checks[1].value : { installed: false, reason: "check failed" };
+      const opencodeMCP = checks[2].status === "fulfilled" ? checks[2].value : { checked: false, reason: "check failed" };
+      const claudeCodeMCP = checks[3].status === "fulfilled" ? checks[3].value : { checked: false, reason: "check failed" };
+      const bwrap = checks[4].status === "fulfilled" ? checks[4].value : (platform === "linux" ? { checked: false, available: false, reason: "check failed" } : null);
       const warnings = [];
       const info = [];
       if (!claude.installed) {
