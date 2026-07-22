@@ -421,6 +421,7 @@ test("doctor warns when the claude plugin is not installed", async (t) => {
     throw new Error(`unexpected request: ${method}`);
   };
   const runShellCommand = (command, args) => {
+    if (command === "bwrap") return { status: 0, stdout: "bubblewrap 0.11.2\n", stderr: "", error: undefined };
     assert.equal(command, "claude");
     assert.deepEqual(args, ["plugin", "list", "--json"]);
     return { status: 0, stdout: JSON.stringify([{ id: "superpowers@claude-plugins-official" }]), stderr: "", error: undefined };
@@ -469,7 +470,10 @@ test("doctor reports the claude plugin as not installed when the claude CLI is m
     if (method === "system.health") return { healthy: true, pid: 1 };
     throw new Error(`unexpected request: ${method}`);
   };
-  const runShellCommand = () => ({ status: null, stdout: "", stderr: "", error: { code: "ENOENT" } });
+  const runShellCommand = (command) => {
+    if (command === "bwrap") return { status: 0, stdout: "bubblewrap 0.11.2\n", stderr: "", error: undefined };
+    return { status: null, stdout: "", stderr: "", error: { code: "ENOENT" } };
+  };
 
   const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand });
 
@@ -478,6 +482,66 @@ test("doctor reports the claude plugin as not installed when the claude CLI is m
     playwrightMcpIsolation: { opencode: { checked: false, reason: "no opencode config with a playwright MCP entry found" }, claudeCode: { checked: false, reason: "~/.claude.json not found" } },
   });
   assert.equal(result.warnings.length, 1);
+});
+
+test("doctor warns when bwrap is not installed on Linux", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const client = fakeClient();
+  client.request = async (method) => {
+    if (method === "system.health") return { healthy: true, pid: 1 };
+    throw new Error(`unexpected request: ${method}`);
+  };
+  const runShellCommand = (command) => {
+    if (command === "bwrap") return { status: null, stdout: "", stderr: "", error: { code: "ENOENT" } };
+    return { status: 0, stdout: JSON.stringify([{ id: "taskferry@taskferry" }]), stderr: "", error: undefined };
+  };
+
+  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand, platform: "linux" });
+
+  assert.equal(result.warnings.length, 1);
+  assert.match(result.warnings[0], /bwrap is not installed/);
+  assert.match(result.warnings[0], /TASKFERRY_DISABLE_SANDBOX/);
+  assert.equal(result.info, undefined);
+});
+
+test("doctor has no sandbox warning or info when bwrap is installed on Linux", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const client = fakeClient();
+  client.request = async (method) => {
+    if (method === "system.health") return { healthy: true, pid: 1 };
+    throw new Error(`unexpected request: ${method}`);
+  };
+  const runShellCommand = (command) => {
+    if (command === "bwrap") return { status: 0, stdout: "bubblewrap 0.11.2\n", stderr: "", error: undefined };
+    return { status: 0, stdout: JSON.stringify([{ id: "taskferry@taskferry" }]), stderr: "", error: undefined };
+  };
+
+  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand, platform: "linux" });
+
+  assert.equal(result.warnings, undefined);
+  assert.equal(result.info, undefined);
+});
+
+test("doctor adds an informational note instead of a bwrap check on non-Linux platforms", async (t) => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const client = fakeClient();
+  client.request = async (method) => {
+    if (method === "system.health") return { healthy: true, pid: 1 };
+    throw new Error(`unexpected request: ${method}`);
+  };
+  const runShellCommand = (command) => {
+    assert.notEqual(command, "bwrap");
+    return { status: 0, stdout: JSON.stringify([{ id: "taskferry@taskferry" }]), stderr: "", error: undefined };
+  };
+
+  const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand, platform: "darwin" });
+
+  assert.equal(result.warnings, undefined);
+  assert.equal(result.info.length, 1);
+  assert.match(result.info[0], /only available on Linux/);
 });
 
 test("watch forwards originSessionId to client.subscribe when set", async () => {
@@ -597,12 +661,10 @@ test("doctor reports a distinct reason when claude exits with a non-ENOENT spawn
     if (method === "system.health") return { healthy: true, pid: 1 };
     throw new Error(`unexpected request: ${method}`);
   };
-  const runShellCommand = () => ({
-    status: null,
-    stdout: "",
-    stderr: "",
-    error: { code: "EACCES", message: "spawnSync claude EACCES" },
-  });
+  const runShellCommand = (command) => {
+    if (command === "bwrap") return { status: 0, stdout: "bubblewrap 0.11.2\n", stderr: "", error: undefined };
+    return { status: null, stdout: "", stderr: "", error: { code: "EACCES", message: "spawnSync claude EACCES" } };
+  };
 
   const result = await runCommand("doctor", {}, { client, homeDirectory: home, env: {}, runShellCommand });
 

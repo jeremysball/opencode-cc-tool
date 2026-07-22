@@ -12,6 +12,7 @@ import {
 } from "./output.js";
 import { defaultRunCommand as defaultShellRunner, pluginInstalled } from "./setup.js";
 import { checkClaudeCodePlaywrightIsolation, checkOpencodePlaywrightIsolation } from "./mcp-isolation.js";
+import { checkBwrapAvailable } from "./sandbox.js";
 
 // Checked from `doctor` so a missing Claude plugin install surfaces as an
 // explicit warning instead of silent absence: without it, `claude-monitor`
@@ -49,7 +50,7 @@ export function normalizeDirectory(directory) {
   return normalized;
 }
 
-export async function runCommand(command, options, { client, io = process, signal, executablePath, cwd = process.cwd(), homeDirectory = os.homedir(), env = process.env, runShellCommand = defaultShellRunner } = {}) {
+export async function runCommand(command, options, { client, io = process, signal, executablePath, cwd = process.cwd(), homeDirectory = os.homedir(), env = process.env, runShellCommand = defaultShellRunner, platform = process.platform } = {}) {
   switch (command) {
     case "home": {
       const directory = normalizeDirectory(options.directory || cwd);
@@ -170,7 +171,9 @@ export async function runCommand(command, options, { client, io = process, signa
       const claude = checkClaudeIntegration(runShellCommand);
       const opencodeMCP = checkOpencodePlaywrightIsolation(homeDirectory, env);
       const claudeCodeMCP = checkClaudeCodePlaywrightIsolation(homeDirectory);
+      const bwrap = platform === "linux" ? checkBwrapAvailable(runShellCommand) : null;
       const warnings = [];
+      const info = [];
       if (!claude.installed) {
         warnings.push(`Claude plugin not installed (${claude.reason || "not found in claude plugin list"}): claude-monitor notifications won't fire. Run taskferry setup to install it.`);
       }
@@ -180,11 +183,18 @@ export async function runCommand(command, options, { client, io = process, signa
       if (claudeCodeMCP.checked && !claudeCodeMCP.isolated) {
         warnings.push(`Playwright MCP for Claude Code is not isolated${claudeCodeMCP.path ? ` (${claudeCodeMCP.path})` : ""}: concurrent dispatches sharing one browser profile crash with SIGKILL. Run taskferry setup to fix${claudeCodeMCP.reason && !claudeCodeMCP.path ? `, or ${claudeCodeMCP.reason.toLowerCase()}` : ""}.`);
       }
+      if (bwrap && !bwrap.available) {
+        warnings.push(`Filesystem sandboxing is unavailable: bwrap is not installed (${bwrap.reason}). Dispatched tasks run without confinement. Install bubblewrap (e.g. apt install bubblewrap), or opt out explicitly with TASKFERRY_DISABLE_SANDBOX=1.`);
+      }
+      if (platform !== "linux") {
+        info.push("Filesystem sandboxing (bwrap) is only available on Linux; dispatched tasks on this platform run unconfined.");
+      }
       return {
         ...health,
         ...(options.full ? { cliVersion: "2.0.0", protocolVersion: 1 } : {}),
         integrations: { claude, playwrightMcpIsolation: { opencode: opencodeMCP, claudeCode: claudeCodeMCP } },
         ...(warnings.length ? { warnings } : {}),
+        ...(info.length ? { info } : {}),
       };
     }
     default:
