@@ -681,6 +681,34 @@ export function createTaskManager({
   }
   loadPersisted();
 
+  // Scrub prompt scratch files left behind by a daemon crash or forced
+  // restart. Each oversized dispatch writes its prompt to PROMPT_DIR as
+  // `${task.id}.prompt.txt` (mode 0o600) and removes it from the task's own
+  // exit/error paths -- but a SIGKILL of the daemon mid-task skips both
+  // cleanup paths and orphans the file forever. Anything in PROMPT_DIR that
+  // doesn't belong to a currently-tracked task id is leftover from such a
+  // crash; deleting it at boot keeps the directory from accumulating
+  // unread prompt contents across restarts.
+  function sweepOrphanedPromptFiles() {
+    let entries;
+    try {
+      entries = fs.readdirSync(PROMPT_DIR);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith(".prompt.txt")) continue;
+      const taskId = entry.slice(0, -".prompt.txt".length);
+      if (tasks.has(taskId)) continue;
+      try {
+        fs.unlinkSync(path.join(PROMPT_DIR, entry));
+      } catch (err) {
+        if (errCode(err) !== "ENOENT") throw err;
+      }
+    }
+  }
+  sweepOrphanedPromptFiles();
+
   function ensureStateLoaded() {
     if (!stateLoadError) return;
     throw new Error(`error: could not read persisted task state: ${stateLoadError.message}\nhelp: repair ${TASKS_FILE} before using opencode task tools`);
