@@ -232,4 +232,3 @@ own root.
 - [docs/security.md](docs/security.md): permissions, key slots, activity-summary privacy
 - [docs/troubleshooting.md](docs/troubleshooting.md): `doctor` output and common failures
 - [docs/migrating-from-mcp.md](docs/migrating-from-mcp.md): command mapping and cleanup
-</content>
