@@ -154,23 +154,38 @@ point at `taskferry setup` as the fix, never mutate from `doctor` itself):
 it detects that its own source files' mtimes changed since startup, and once
 no tasks are running/queued, closes the server and respawns onto the new
 code. This is exactly the "a `git pull` just landed" moment issue #73 cares
-about, so the managed-file resync piggybacks on it rather than introducing a
-second trigger:
+about, so the managed-file resync piggybacks on it — but that path alone only
+covers a daemon that was already running when the drift happened. A daemon
+that starts fresh (first launch, or a relaunch after being down — reboot, a
+crash, or a manual `taskferry daemon` run after `git pull` while nothing was
+running) never goes through `maybeRestart` in that process's lifetime: it
+captures `startupSourceSignature` at that startup, so there is nothing for it
+to ever diverge from. So there are two call sites, not one:
 
-- Immediately before `maybeRestart`'s existing `close()` / `spawnReplacement()`
-  step, call a new `resyncManagedFiles({ checkoutDirectory, homeDirectory, env })`
-  that runs `syncManagedFile` for all 4 managed files plus the hook merge.
-- Wrap the whole call in `try { ... } catch (error) { /* log, don't rethrow */ }`.
-  A resync failure (e.g. permissions, disk full) must never block the
-  daemon's own restart — the daemon coming back up on new code is the more
-  critical guarantee. Log the caught error via the daemon's existing stderr
-  diagnostic path so it's visible without being fatal.
-- This makes the resync automatic and unattended: the user runs `git pull`,
-  the next request after that hits an idle daemon, the daemon resyncs
-  everything and restarts, with no manual `taskferry setup` required for the
+- **On every `startDaemon` call, once, before the server starts accepting
+  requests:** call `resyncManagedFiles({ checkoutDirectory, homeDirectory, env })`
+  unconditionally. This is what actually closes the "started on new code but
+  never went through a live restart" gap — it runs regardless of whether this
+  is the very first install or the Nth relaunch, and regardless of whether
+  `maybeRestart` will ever fire during this process's life.
+- **Immediately before `maybeRestart`'s existing `close()` / `spawnReplacement()`
+  step**, call the same `resyncManagedFiles` again. This covers the
+  long-lived-daemon case: a daemon that has been running for a while when a
+  `git pull` lands underneath it resyncs at the same moment it decides to
+  restart itself onto the new code, rather than waiting for a future cold
+  start that may not come for days.
+- Both call sites wrap the call in `try { ... } catch (error) { /* log, don't
+  rethrow */ }`. A resync failure (e.g. permissions, disk full) must never
+  block the daemon from starting or from restarting — the daemon coming up
+  (or back up) on new code is the more critical guarantee. Log the caught
+  error via the daemon's existing stderr diagnostic path so it's visible
+  without being fatal.
+- This makes the resync automatic and unattended in both the cold-start and
+  long-lived-daemon cases, with no manual `taskferry setup` required for the
   common case. `doctor` and manual `taskferry setup` remain as the
   visibility/fallback path for anyone not running the daemon continuously, or
-  who wants to confirm sync state without waiting for the next request.
+  who wants to confirm sync state without waiting for the daemon to start or
+  restart.
 
 ## Migration
 
@@ -205,6 +220,11 @@ Unit tests (in `setup.test.js`, `commands.test.js`, `daemon.test.js`) cover:
   no-ops when absent; tolerates "plugin already not installed."
 - `doctor`: reports a warning per stale/missing managed file and per stale/
   missing hook entry; reports nothing when everything is current.
-- Daemon resync: `maybeRestart` calls the resync before respawning; a resync
-  failure is caught and logged but does not prevent the restart; verifies
-  resync only runs on the deferred-restart path (not on every request).
+- Daemon resync: `startDaemon` calls the resync once on startup, before the
+  server begins accepting requests; `maybeRestart` also calls the resync
+  before respawning; a resync failure at either call site is caught and
+  logged but does not prevent daemon startup or restart, respectively;
+  verifies the `maybeRestart`-path resync only runs on the deferred-restart
+  path (not on every request), and that the startup-path resync runs exactly
+  once per `startDaemon` call regardless of whether a later restart ever
+  happens.
