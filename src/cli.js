@@ -76,6 +76,9 @@ export async function runCli(argv = process.argv.slice(2), {
       || (parsed.command === "list" && !parsed.options.all)) {
       parsed.options.directory = normalizeDirectory(parsed.options.directory || cwd);
     }
+    if ((parsed.command === "dispatch" || parsed.command === "advisor") && parsed.options.prompt === "-") {
+      parsed.options.prompt = await readPromptFromStdin(io.stdin || process.stdin, parsed.command);
+    }
     client = await connectClient({ env });
     const value = await runCommand(parsed.command, parsed.options, {
       client,
@@ -118,6 +121,25 @@ if (process.argv[1] && resolveInvokedPath(process.argv[1]) === fileURLToPath(imp
     writeError(error);
     process.exitCode = 1;
   });
+}
+
+// `--prompt -` lets a large prompt bypass the argv-length limit entirely by
+// piping it into taskferry's own stdin (issue #78) instead of requiring the
+// caller to write a temp file and pass a path themselves.
+async function readPromptFromStdin(stdin, command) {
+  const stdinHelp = `Pipe a prompt into the command (e.g. \`cat prompt.txt | taskferry ${command} --prompt -\`), or pass --prompt "<text>" directly`;
+  if (stdin.isTTY) {
+    throw new UsageError("--prompt - requires a piped stdin (no TTY input detected)", stdinHelp);
+  }
+  const chunks = [];
+  for await (const chunk of stdin) {
+    chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  }
+  const content = Buffer.concat(chunks).toString("utf8").replace(/\r?\n$/, "");
+  if (!content) {
+    throw new UsageError("--prompt - received empty stdin", stdinHelp);
+  }
+  return content;
 }
 
 function resolveInvokedPath(invoked) {

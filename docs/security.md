@@ -52,6 +52,12 @@ task state.
 - The daemon only sees environment values present at its own startup;
   restart it after changing any of these variables (see
   [daemon.md](daemon.md#auto-start)).
+- If a dispatched model's provider is the one `TASKFERRY_PROVIDER_KEY_ENV`
+  targets (matched by convention, e.g. `openrouter/...` against
+  `OPENROUTER_API_KEY`) and no key resolves for it — neither the ambient
+  variable nor a `--key-slot` — `dispatch` fails immediately with a clear
+  error instead of spawning `opencode` and getting an opaque crash deep in
+  the child.
 - Every dispatched child's environment has every registered slot *source*
   variable stripped, whether or not that dispatch used a slot — so an
   unslotted task never accidentally inherits a backup key meant to stay
