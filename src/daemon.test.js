@@ -73,6 +73,8 @@ function fakeManagerFactory(tasks = [], { checkSummaryModelReady } = {}) {
       return { status: "done", message: "advice" };
     },
     checkSummaryModelReady: checkSummaryModelReady ?? (async () => {}),
+    setActivitySummarySubscriptions() {},
+    setActivitySubscriptions() {},
   };
 
   return {
@@ -318,6 +320,75 @@ describe("Unix socket daemon", () => {
     const secondEvents = await second.waitForEvents(2);
     assert.deepEqual(firstEvents.map((message) => message.event.taskId), ["one", "three"]);
     assert.deepEqual(secondEvents.map((message) => message.event.taskId), ["two", "three"]);
+  });
+
+  test("routes each activity subscription its own summary variant from activityVariants", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+    t.after(() => daemon.close());
+    const rawPeer = await openPeer(paths.socketPath);
+    const summaryPeer = await openPeer(paths.socketPath);
+    t.after(() => rawPeer.close());
+    t.after(() => summaryPeer.close());
+
+    const rawSub = await rawPeer.request("sub-raw", "event.subscribe", { directory: paths.root });
+    const summarySub = await summaryPeer.request("sub-summary", "event.subscribe", { directory: paths.root, summaries: true });
+
+    fake.emit({
+      type: "task.activity",
+      taskId: "oc_1",
+      directory: paths.root,
+      status: "running",
+      activityVariants: {
+        false: { includeSummary: false, activity: "raw narration", outputWatermark: 100 },
+        true: { includeSummary: true, activity: "summarized narration", outputWatermark: 100 },
+      },
+    });
+
+    const rawEvents = await rawPeer.waitForEvents(1);
+    const summaryEvents = await summaryPeer.waitForEvents(1);
+
+    assert.equal(rawEvents[0].event.activity, "raw narration");
+    assert.equal(rawEvents[0].event.includeSummary, false);
+    assert.equal(rawEvents[0].event.activityVariants, undefined);
+    assert.equal(summaryEvents[0].event.activity, "summarized narration");
+    assert.equal(summaryEvents[0].event.includeSummary, true);
+    assert.equal(summaryEvents[0].event.activityVariants, undefined);
+    assert.equal(rawEvents[0].subscriptionId, rawSub.result.subscriptionId);
+    assert.equal(summaryEvents[0].subscriptionId, summarySub.result.subscriptionId);
+  });
+
+  test("skips a subscription when activityVariants lacks its requested variant", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+    t.after(() => daemon.close());
+    const rawPeer = await openPeer(paths.socketPath);
+    const summaryPeer = await openPeer(paths.socketPath);
+    t.after(() => rawPeer.close());
+    t.after(() => summaryPeer.close());
+
+    await rawPeer.request("sub-raw", "event.subscribe", { directory: paths.root });
+    await summaryPeer.request("sub-summary", "event.subscribe", { directory: paths.root, summaries: true });
+
+    fake.emit({
+      type: "task.activity",
+      taskId: "oc_1",
+      directory: paths.root,
+      status: "running",
+      activityVariants: {
+        false: { includeSummary: false, activity: "raw only", outputWatermark: 50 },
+      },
+    });
+
+    const rawEvents = await rawPeer.waitForEvents(1);
+    assert.equal(rawEvents[0].event.activity, "raw only");
+
+    const immediate = [];
+    summaryPeer.socket.once("data", (chunk) => immediate.push(chunk));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(immediate.length, 0, "summary subscriber should not receive a raw-only variant");
   });
 
   test("cleans up all subscriptions when a client disconnects", async (t) => {

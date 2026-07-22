@@ -110,7 +110,7 @@ describe("task activity events", () => {
       ["task.state", "running"],
     ]);
     assert.equal(events[2].type, "task.activity");
-    assert.equal(events[2].activity, "Check the server");
+    assert.equal(events[2].activityVariants["false"].activity, "Check the server");
 
     child.emit("exit", 0, null);
     await new Promise((resolve) => setImmediate(resolve));
@@ -191,7 +191,7 @@ describe("task activity events", () => {
     await new Promise((resolve) => setImmediate(resolve));
 
     const activity = events.find((event) => event.type === "task.activity" && event.taskId === source.id);
-    assert.equal(activity.activity, "Inspecting the daemon configuration.");
+    assert.equal(activity.activityVariants["true"].activity, "Inspecting the daemon configuration.");
     assert.equal(events.some((event) => event.taskId === summary.id), false);
     manager.setActivitySummarySubscriptions(0);
     children.find((entry) => !entry.summary).child.emit("exit", 0, null);

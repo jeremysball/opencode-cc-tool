@@ -791,10 +791,10 @@ describe("output-completeness check at settlement time (issue #35)", () => {
 
     const activityEvents = events.filter((event) => event.type === "task.activity");
     assert.ok(activityEvents.length >= 1, "expected at least one task.activity event");
-    const failed = activityEvents.find((event) => event.summaryFailed === true);
-    assert.ok(failed, "expected a task.activity event with summaryFailed: true");
-    assert.equal(failed.activity, undefined);
-    assert.match(failed.summaryError, /summary model is unavailable/);
+    const failed = activityEvents.find((event) => event.activityVariants?.true?.summaryFailed === true);
+    assert.ok(failed, "expected a task.activity event with summaryFailed: true in activityVariants");
+    assert.equal(failed.activityVariants.true.activity, undefined);
+    assert.match(failed.activityVariants.true.summaryError, /summary model is unavailable/);
   });
 
   test("a clean done task with a final message is not flagged incomplete", () => {

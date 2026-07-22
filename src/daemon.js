@@ -275,7 +275,14 @@ export async function startDaemon({
     for (const [subscriptionId, subscription] of subscriptions) {
       if (event.directory !== subscription.directory || subscription.socket.destroyed) continue;
       if (subscription.originSessionId && event.originSessionId && subscription.originSessionId !== event.originSessionId) continue;
-      writeMessage(subscription.socket, eventMessage(subscriptionId, event));
+      if (event.activityVariants) {
+        const variant = event.activityVariants[String(subscription.summaries)];
+        if (!variant) continue;
+        const { activityVariants, ...rest } = event;
+        writeMessage(subscription.socket, eventMessage(subscriptionId, { ...rest, ...variant }));
+      } else {
+        writeMessage(subscription.socket, eventMessage(subscriptionId, event));
+      }
     }
   };
   const manager = taskManagerFactory({ ...taskManagerOptions, stateDir, runtimeDir, onEvent });
@@ -283,8 +290,21 @@ export async function startDaemon({
   let restartPending = false;
   let restarting = false;
   const updateSummarySubscriptions = () => {
-    if (typeof manager.setActivitySummarySubscriptions !== "function") return;
-    manager.setActivitySummarySubscriptions(Array.from(subscriptions.values()).filter((subscription) => subscription.summaries).length);
+    if (typeof manager.setActivitySubscriptions === "function") {
+      /** @type {Map<string, Set<boolean>>} */
+      const subs = new Map();
+      for (const subscription of subscriptions.values()) {
+        let variants = subs.get(subscription.directory);
+        if (!variants) {
+          variants = new Set();
+          subs.set(subscription.directory, variants);
+        }
+        variants.add(subscription.summaries);
+      }
+      manager.setActivitySubscriptions(subs);
+    } else if (typeof manager.setActivitySummarySubscriptions === "function") {
+      manager.setActivitySummarySubscriptions(Array.from(subscriptions.values()).filter((subscription) => subscription.summaries).length);
+    }
   };
   const server = net.createServer((socket) => {
     clients.add(socket);
