@@ -127,3 +127,39 @@ Every dispatched OpenCode child, and every summary child, runs with
 present — so a task that itself runs `opencode` (directly, or indirectly
 through a nested taskferry dispatch) doesn't load a second copy of the
 toast/context integration inside that nested process.
+
+## Filesystem sandboxing (bubblewrap)
+
+Every dispatched OpenCode child, and every summary child, runs wrapped in
+[`bwrap`](https://github.com/containers/bubblewrap) by default on Linux:
+
+- **Mount layout.** A full read-only bind of `/` (`--ro-bind / /`) so the
+  sandboxed process can read normal system libraries, binaries, and
+  OpenCode's own config without a hand-maintained whitelist, with the
+  following paths overlaid as empty (`--tmpfs`) on top of that read-only
+  view:
+  - `TASKFERRY_STATE_DIR` (every task's NDJSON logs, including other tasks'
+    prompt/tool output)
+  - `~/.ssh`, `~/.aws`, `~/.config/gcloud`, `~/.config/gh`, `~/.gnupg`
+- **Read-write access** is then re-granted only for the task's own working
+  directory and `TASKFERRY_RUNTIME_DIR` (needed so a nested/recursive
+  dispatch from inside the sandbox can still reach the daemon socket at
+  `<runtimeDir>/daemon.sock`).
+- **Deny-list is fixed** in this version — no config override. It covers
+  taskferry's own state dir plus the standard credential locations; a
+  config override can be added later if a real need surfaces.
+- **Fail-fast on Linux.** If sandboxing is enabled (the default) and `bwrap`
+  is not installed, dispatch fails immediately with a `crashed` task and a
+  matching `spawnError` — there is no silent unsandboxed fallback on the
+  platform where sandboxing is expected to work.
+- **macOS.** `bwrap` is Linux-only; on macOS dispatch runs exactly as it did
+  before this feature, with no wrapping, no availability check, and no
+  error. `taskferry doctor` surfaces this as an informational note, not a
+  warning.
+- **Opt out**, if you need a dispatch to see the whole filesystem (e.g. it
+  legitimately needs `~/.ssh` or another denied path): pass `--no-sandbox`
+  on a single `taskferry dispatch` call, or set
+  `TASKFERRY_DISABLE_SANDBOX=1` (or `"true"`) on the daemon to disable
+  sandboxing for every dispatch it serves. `sandboxEnabled` is also a
+  `taskferry` config field, following the usual precedence (CLI flag > env
+  var > config file > default).
