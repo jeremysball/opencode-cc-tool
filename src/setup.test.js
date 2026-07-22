@@ -31,6 +31,10 @@ function makeFixture(t) {
     opencodeSourcePath: path.join(src, "opencode-plugin.js"),
     tfSlSourcePath: path.join(src, "tf-sl.sh"),
     homeDirectory: home,
+    env: {
+      XDG_CONFIG_HOME: path.join(home, ".config"),
+      XDG_STATE_HOME: path.join(home, ".local", "state"),
+    },
   };
 }
 
