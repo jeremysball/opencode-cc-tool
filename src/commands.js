@@ -68,6 +68,7 @@ export async function runCommand(command, options, { client, io = process, signa
         ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
         ...(options.keySlot === undefined ? {} : { keySlot: options.keySlot }),
         ...(options.finalMarker === undefined ? {} : { finalMarker: options.finalMarker }),
+        ...(options.noSandbox === undefined ? {} : { noSandbox: options.noSandbox }),
         ...(process.env.CLAUDE_CODE_SESSION_ID ? { originSessionId: process.env.CLAUDE_CODE_SESSION_ID } : {}),
       });
     }

@@ -563,6 +563,32 @@ test("dispatch omits originSessionId when CLAUDE_CODE_SESSION_ID is unset", asyn
   }
 });
 
+test("dispatch forwards noSandbox to the RPC payload when set", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  let capturedParams;
+  const client = {
+    request: async (method, params) => {
+      capturedParams = params;
+      return { id: "oc_1" };
+    },
+  };
+  await runCommand("dispatch", { prompt: "hi", directory: root, noSandbox: true }, { client, cwd: root });
+  assert.equal(capturedParams.noSandbox, true);
+});
+
+test("dispatch omits noSandbox from the RPC payload when not set", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  let capturedParams;
+  const client = {
+    request: async (method, params) => {
+      capturedParams = params;
+      return { id: "oc_1" };
+    },
+  };
+  await runCommand("dispatch", { prompt: "hi", directory: root }, { client, cwd: root });
+  assert.equal("noSandbox" in capturedParams, false);
+});
+
 test("doctor reports a distinct reason when claude exits with a non-ENOENT spawn error", async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-doctor-home-"));
   t.after(() => fs.rmSync(home, { recursive: true, force: true }));
