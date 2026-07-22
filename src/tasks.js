@@ -603,6 +603,8 @@ export function createTaskManager({
   let modelsCache = { expiresAt: 0, output: "" };
   let summaryAgentVerifiedUntil = 0;
   let activitySummarySubscriptions = 0;
+  /** @type {Map<string, Set<boolean>>} */
+  const activitySubscriptions = new Map();
   /** @type {Error|null} */
   let stateLoadError = null;
 
@@ -641,20 +643,25 @@ export function createTaskManager({
         // Activity is advisory and cannot interrupt task lifecycle.
       }
     };
-    void activityCache.refresh(task, { force }).then(
-      /** @param {{activity: string, outputWatermark: number, cached: boolean}|null} result */ (result) => {
-        if (!result) return;
-        emit({ ...baseEvent(), activity: result.activity, outputWatermark: result.outputWatermark });
-      },
-      (err) => {
-        // A propagated summarizer failure (Task 4) must not become an
-        // unhandled rejection here, and must not be smoothed over with a
-        // retry or stale-narration substitution -- every failed tick
-        // reports failure, explicitly, so a --summaries subscriber can tell
-        // a real summary from a failed one.
-        emit({ ...baseEvent(), summaryFailed: true, summaryError: errMessage(err) });
-      }
+    const dirVariants = activitySubscriptions.get(scheduledDirectory);
+    const variants = dirVariants && dirVariants.size > 0
+      ? [...dirVariants]
+      : [activitySummariesEnabled && activitySummarySubscriptions > 0];
+    const refreshes = variants.map((includeSummary) =>
+      activityCache.refresh(task, { force, includeSummary })
+        .then((result) => (result ? { includeSummary, activity: result.activity, outputWatermark: result.outputWatermark } : null))
+        .catch((err) => ({ includeSummary, summaryFailed: true, summaryError: errMessage(err) }))
     );
+    void Promise.all(refreshes).then((results) => {
+      /** @type {Record<string, {includeSummary?: boolean, activity?: string, outputWatermark?: number, summaryFailed?: boolean, summaryError?: string}>} */
+      const activityVariants = {};
+      for (const r of results) {
+        if (!r) continue;
+        activityVariants[String(r.includeSummary)] = r;
+      }
+      if (Object.keys(activityVariants).length === 0) return;
+      emit({ ...baseEvent(), activityVariants });
+    });
   }
 
   function loadPersisted() {
@@ -2329,6 +2336,16 @@ export function createTaskManager({
       activitySummarySubscriptions = Math.max(0, Number.isSafeInteger(count) ? count : 0);
       activityCache.setSummariesEnabled(activitySummariesEnabled && activitySummarySubscriptions > 0);
     },
+    /** @param {Map<string, Set<boolean>>} subs */
+    setActivitySubscriptions: (subs) => {
+      activitySubscriptions.clear();
+      for (const [dir, variants] of subs) activitySubscriptions.set(dir, new Set(variants));
+      const totalCount = Array.from(subs.values()).reduce((sum, v) => sum + (v.has(true) ? 1 : 0), 0);
+      activitySummarySubscriptions = totalCount;
+      activityCache.setSummariesEnabled(activitySummariesEnabled && totalCount > 0);
+    },
+    /** @param {string} dir @returns {Set<boolean>|undefined} */
+    getActivitySubscriptionsForDir: (dir) => activitySubscriptions.get(dir),
     advisor,
     paths: { STATE_DIR: stateDir, LOG_DIR, SUMMARY_DIR, TASKS_FILE },
     // Exposed primarily so tests can seed the summary session id and watermark
