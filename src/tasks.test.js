@@ -88,11 +88,13 @@ describe("persistTask() durability across concurrent manager instances", () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
     const mgrA = createTaskManager({
       stateDir,
+      sandboxEnabled: false,
       spawnFn: () => fakeChild(1001),
       killFn: () => { throw new Error("not used"); },
     });
     const mgrB = createTaskManager({
       stateDir,
+      sandboxEnabled: false,
       spawnFn: () => fakeChild(1002),
       killFn: () => { throw new Error("not used"); },
     });
@@ -108,7 +110,7 @@ describe("persistTask() durability across concurrent manager instances", () => {
   test("malformed tasks.json surfaces as a structured error instead of throwing at construction", () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
     fs.writeFileSync(path.join(stateDir, "tasks.json"), "{ not valid json");
-    const mgr = createTaskManager({ stateDir, spawnFn: () => fakeChild(), killFn: () => {} });
+    const mgr = createTaskManager({ stateDir, sandboxEnabled: false, spawnFn: () => fakeChild(), killFn: () => {} });
     assert.throws(
       () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir() }),
       /error: could not read persisted task state/
@@ -688,6 +690,7 @@ describe("output-completeness check at settlement time (issue #35)", () => {
 
     const mgr1 = createTaskManager({
       stateDir,
+      sandboxEnabled: false,
       spawnFn: () => child,
       killFn: () => {},
       listModelsFn: () => "opencode/hy3-free\n",
@@ -708,6 +711,7 @@ describe("output-completeness check at settlement time (issue #35)", () => {
 
     const mgr2 = createTaskManager({
       stateDir,
+      sandboxEnabled: false,
       spawnFn: () => { throw new Error("not used"); },
       killFn: () => {},
       listModelsFn: () => "opencode/hy3-free\n",
@@ -850,6 +854,7 @@ describe("active-task concurrency cap (regressions)", () => {
     const killCalls = [];
     const mgr = createTaskManager({
       stateDir,
+      sandboxEnabled: false,
       maxConcurrentTasks: 1,
       maxDispatchesPerWindow: 10,
       dispatchWindowMs: 60000,
@@ -894,6 +899,7 @@ describe("config file precedence (maxConcurrentTasks)", () => {
     });
     const manager = createTaskManager({
       stateDir,
+      sandboxEnabled: false,
       spawnFn: () => {
         const child = fakeChild();
         children.push(child);
@@ -2446,6 +2452,7 @@ describe("summarize()", () => {
     const child = fakeChild();
     const mgr = createTaskManager({
       stateDir,
+      sandboxEnabled: false,
       spawnFn: () => child,
       killFn: () => {},
     });

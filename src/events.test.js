@@ -19,6 +19,7 @@ function makeManager({ tasks = [], spawnFn, killFn, onEvent, maxConcurrentTasks 
   fs.writeFileSync(path.join(stateDir, "tasks.json"), JSON.stringify(tasks, null, 2));
   return createTaskManager({
     stateDir,
+    sandboxEnabled: false,
     spawnFn: spawnFn ?? (() => fakeChild()),
     killFn: killFn ?? (() => {}),
     onEvent,

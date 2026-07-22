@@ -95,6 +95,7 @@ describe("task activity events", () => {
     const events = [];
     const manager = createTaskManager({
       stateDir,
+      sandboxEnabled: false,
       spawnFn: () => child,
       killFn: () => {},
       activitySummariesEnabled: false,
@@ -127,6 +128,7 @@ describe("task activity events", () => {
     const events = [];
     const manager = createTaskManager({
       stateDir,
+      sandboxEnabled: false,
       spawnFn: () => child,
       killFn: () => {},
       activitySummariesEnabled: false,
@@ -156,6 +158,7 @@ describe("task activity events", () => {
     const events = [];
     const manager = createTaskManager({
       stateDir,
+      sandboxEnabled: false,
       spawnFn: (_command, args) => {
         const child = fakeChild(5000 + children.length);
         children.push({ child, summary: args.includes("--agent") });
