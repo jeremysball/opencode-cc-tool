@@ -42,11 +42,15 @@ export function checkBwrapAvailable(runCommand = defaultRunCommand) {
 }
 
 /**
+ * The fixed v1 deny-list. Callers building a real bwrap invocation must
+ * filter out entries that don't exist on disk before passing this to
+ * buildBwrapArgs() — bwrap's --tmpfs fails if the mount point doesn't
+ * already exist under the read-only-bound root.
  * @param {string} homeDir
  * @param {string} stateDir
  * @returns {string[]}
  */
-function defaultDenyList(homeDir, stateDir) {
+export function defaultDenyList(homeDir, stateDir) {
   return [
     stateDir,
     path.join(homeDir, ".ssh"),
@@ -64,15 +68,27 @@ function defaultDenyList(homeDir, stateDir) {
  * @param {string} options.runtimeDir
  * @param {string} options.homeDir
  * @param {string[]} [options.denyList]
+ * @param {[string, string][]} [options.extraRoBinds] - extra [src, dest] read-only binds, applied after the
+ *   read-write binds so a more specific path (e.g. a single credentials file) can be pinned read-only even
+ *   though it sits under an already read-write-bound directory.
  * @returns {string[]}
  */
-export function buildBwrapArgs({ directory, stateDir, runtimeDir, homeDir, denyList = defaultDenyList(homeDir, stateDir) }) {
+export function buildBwrapArgs({ directory, stateDir, runtimeDir, homeDir, denyList = defaultDenyList(homeDir, stateDir), extraRoBinds = [] }) {
   const args = ["--ro-bind", "/", "/"];
+  // bwrap applies mounts in argument order, and a later mount on a parent
+  // directory shadows an earlier mount nested inside it. --tmpfs /tmp must
+  // come before the deny-list and read-write binds below, or any of them
+  // that happen to live under /tmp (a plausible scratch/CI/worktree path)
+  // would silently disappear behind the fresh, empty /tmp tmpfs.
+  args.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp");
   for (const denied of denyList) {
     args.push("--tmpfs", denied);
   }
   args.push("--bind", directory, directory);
   args.push("--bind", runtimeDir, runtimeDir);
-  args.push("--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--unshare-all", "--share-net", "--die-with-parent");
+  for (const [src, dest] of extraRoBinds) {
+    args.push("--ro-bind", src, dest);
+  }
+  args.push("--unshare-all", "--share-net", "--die-with-parent");
   return args;
 }

@@ -13,7 +13,7 @@ import { createTaskManager, summaryAgentDeniedBash } from "./tasks.js";
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, sandboxEnabled = false, checkBwrapAvailableFn, runtimeDir, platform, onEvent } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, runtimeDir, platform, onEvent } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -32,6 +32,7 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     verifySummaryAgentFn: verifySummaryAgentFn ?? (async () => {}),
     sandboxEnabled,
     ...(checkBwrapAvailableFn != null ? { checkBwrapAvailableFn } : {}),
+    ...(existsFn != null ? { existsFn } : {}),
     ...(runtimeDir != null ? { runtimeDir } : {}),
     ...(platform != null ? { platform } : {}),
     ...(onEvent != null ? { onEvent } : {}),
@@ -286,7 +287,7 @@ describe("bwrap sandboxing", () => {
 
     assert.equal(captured.cmd, "bwrap");
     assert.deepEqual(captured.args.slice(0, 3), ["--ro-bind", "/", "/"]);
-    assert.equal(captured.args[3], "--tmpfs");
+    assert.deepEqual(captured.args.slice(3, 9), ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"]);
     assert.ok(captured.args.includes(mgr.paths.STATE_DIR));
     const bindIndex = captured.args.indexOf("--bind");
     assert.equal(captured.args[bindIndex + 1], os.tmpdir());
@@ -296,6 +297,91 @@ describe("bwrap sandboxing", () => {
       "-m", "opencode-go/minimax-m3", "--variant", "max", "--", "hello",
     ]);
     assert.equal(captured.opts.cwd, os.tmpdir());
+  });
+
+  test("drops deny-list paths that don't exist on disk, since bwrap's --tmpfs fails on a missing mount point", () => {
+    let captured = null;
+    const missing = path.join(os.homedir(), ".aws");
+    const present = path.join(os.homedir(), ".ssh");
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      existsFn: (p) => p !== missing,
+      platform: "linux",
+    });
+
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+
+    assert.equal(captured.args.includes(missing), false);
+    assert.equal(captured.args.includes(present), true);
+  });
+
+  test("points XDG_DATA_HOME at a writable spot under runtimeDir when sandboxing, so opencode's own log/session db isn't blocked by the read-only root", () => {
+    let captured = null;
+    const runtimeDir = path.join(os.tmpdir(), "axi-tasks-runtime");
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      runtimeDir,
+    });
+
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+
+    assert.equal(captured.opts.env.XDG_DATA_HOME, path.join(runtimeDir, "opencode-data"));
+  });
+
+  test("ro-binds the real opencode auth.json into the sandboxed XDG_DATA_HOME when it exists, so credentialed providers still resolve", () => {
+    let captured = null;
+    const runtimeDir = path.join(os.tmpdir(), "axi-tasks-runtime");
+    const realAuthFile = path.join(os.homedir(), ".local", "share", "opencode", "auth.json");
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      existsFn: (p) => p === realAuthFile,
+      platform: "linux",
+      runtimeDir,
+    });
+
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+
+    const srcIndex = captured.args.indexOf(realAuthFile);
+    assert.notEqual(srcIndex, -1);
+    assert.equal(captured.args[srcIndex - 1], "--ro-bind");
+    assert.equal(captured.args[srcIndex + 1], path.join(runtimeDir, "opencode-data", "opencode", "auth.json"));
+  });
+
+  test("omits the auth.json ro-bind when the real file doesn't exist on disk", () => {
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      existsFn: () => false,
+      platform: "linux",
+    });
+
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+
+    // "--ro-bind" still appears once, for the base "/" root bind — only the
+    // extra auth.json bind (with its "opencode-data" destination) is absent.
+    assert.equal(captured.args.some((arg) => typeof arg === "string" && arg.includes("opencode-data")), false);
+  });
+
+  test("leaves XDG_DATA_HOME untouched when sandboxing is disabled", () => {
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: false,
+      platform: "linux",
+    });
+
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+
+    assert.equal(captured.opts.env.XDG_DATA_HOME, undefined);
   });
 
   test("falls through to the unwrapped opencode command when --no-sandbox is set on a dispatch", () => {

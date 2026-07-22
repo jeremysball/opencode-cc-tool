@@ -12,7 +12,7 @@ import { RESULT_FIELDS } from "./protocol.js";
 import { formatToolEventForNarration } from "./narration-format.js";
 import { errCode } from "./errors.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
-import { buildBwrapArgs, checkBwrapAvailable, platformSupportsSandbox } from "./sandbox.js";
+import { buildBwrapArgs, checkBwrapAvailable, defaultDenyList, platformSupportsSandbox } from "./sandbox.js";
 
 /**
  * @typedef {object} SummaryOf
@@ -355,6 +355,7 @@ const WATCHDOG_KILL_GRACE_MS = 5000;
  * @param {NodeJS.Platform} [options.platform]
  * @param {boolean} [options.sandboxEnabled]
  * @param {() => {checked: boolean, available: boolean, reason?: string}} [options.checkBwrapAvailableFn]
+ * @param {(path: string) => boolean} [options.existsFn]
  * @param {string} [options.runtimeDir]
  * @param {(event: object) => void} [options.onEvent]
  */
@@ -437,6 +438,7 @@ export function createTaskManager({
     ? !["1", "true"].includes(process.env.TASKFERRY_DISABLE_SANDBOX)
     : (/** @type {boolean|undefined} */ (config.sandboxEnabled) ?? true),
   checkBwrapAvailableFn = checkBwrapAvailable,
+  existsFn = fs.existsSync,
   runtimeDir = path.join(stateDir, "run"),
   onEvent,
 } = {}) {
@@ -1315,7 +1317,7 @@ export function createTaskManager({
     try {
       logFd = fs.openSync(task.logPath, "a", 0o600);
       fs.chmodSync(task.logPath, 0o600);
-      const spawnEnv = isSummary ? summaryLaunch.env : dispatchEnvironment(dispatchLaunch.keyEnvValue);
+      let spawnEnv = isSummary ? summaryLaunch.env : dispatchEnvironment(dispatchLaunch.keyEnvValue);
       const launchDirectory = isSummary ? SUMMARY_DIR : dispatchLaunch.directory;
       const noSandbox = !isSummary && dispatchLaunch.noSandbox === true;
       let spawnCommand = "opencode";
@@ -1323,7 +1325,30 @@ export function createTaskManager({
       if (sandboxEnabled && !noSandbox && platformSupportsSandbox(platform)) {
         requireBwrap();
         spawnCommand = "bwrap";
-        spawnArgs = buildBwrapArgs({ directory: launchDirectory, stateDir, runtimeDir, homeDir: os.homedir() }).concat(["--", "opencode", ...args]);
+        const homeDir = os.homedir();
+        // bwrap's --tmpfs fails ("Read-only file system") if the mount point
+        // doesn't already exist under the --ro-bind / / root, so any
+        // deny-list entry the user simply doesn't have (e.g. no ~/.aws) must
+        // be dropped before it reaches buildBwrapArgs, not passed through.
+        const denyList = defaultDenyList(homeDir, stateDir).filter(existsFn);
+        // opencode writes its own log/session db/snapshots under
+        // XDG_DATA_HOME, which defaults to a path under the real home
+        // directory — read-only inside the sandbox. Point it at a writable
+        // spot under runtimeDir (already bound writable, and stable across
+        // dispatches so --continue --session lookups still resolve).
+        const realDataHome = spawnEnv.XDG_DATA_HOME || path.join(homeDir, ".local", "share");
+        const realAuthFile = path.join(realDataHome, "opencode", "auth.json");
+        const sandboxedDataHome = path.join(runtimeDir, "opencode-data");
+        // Provider credentials (opencode-go, etc.) live in that same real
+        // auth.json — without it, opencode can't see any provider it
+        // needs a stored key for and reports the model as unknown. Pin it
+        // read-only into the fresh data home so credentials stay visible
+        // without making the whole real data directory writable.
+        const extraRoBinds = existsFn(realAuthFile)
+          ? /** @type {[string, string][]} */ ([[realAuthFile, path.join(sandboxedDataHome, "opencode", "auth.json")]])
+          : [];
+        spawnArgs = buildBwrapArgs({ directory: launchDirectory, stateDir, runtimeDir, homeDir, denyList, extraRoBinds }).concat(["--", "opencode", ...args]);
+        spawnEnv = { ...spawnEnv, XDG_DATA_HOME: sandboxedDataHome };
       }
       // No tmux: the child has no shared session to introspect. It is its own
       // process group so cancellation can stop any subprocesses it creates.
