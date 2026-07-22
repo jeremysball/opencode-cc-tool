@@ -13,6 +13,7 @@ import {
 import { defaultRunCommandAsync as defaultShellRunner, pluginInstalled } from "./setup.js";
 import { checkClaudeCodePlaywrightIsolation, checkOpencodePlaywrightIsolation } from "./mcp-isolation.js";
 import { checkBwrapAvailableAsync } from "./sandbox.js";
+import { checkSkills as defaultCheckSkills } from "../scripts/generate-skill.js";
 
 // Default timeout for the CLI `wait` command (and `summary --wait`) when no
 // explicit --timeout-ms is given. Kept generous (15 min) so real tasks aren't
@@ -67,7 +68,7 @@ export function normalizeDirectory(directory) {
   return normalized;
 }
 
-export async function runCommand(command, options, { client, io = process, signal, executablePath, cwd = process.cwd(), homeDirectory = os.homedir(), env = process.env, runShellCommand = defaultShellRunner, platform = process.platform } = {}) {
+export async function runCommand(command, options, { client, io = process, signal, executablePath, cwd = process.cwd(), homeDirectory = os.homedir(), env = process.env, runShellCommand = defaultShellRunner, platform = process.platform, checkSkills = defaultCheckSkills } = {}) {
   switch (command) {
     case "home": {
       const directory = normalizeDirectory(options.directory || cwd);
@@ -77,6 +78,15 @@ export async function runCommand(command, options, { client, io = process, signa
     case "version":
       return { name: "taskferry", version: "2.0.0", protocolVersion: 1 };
     case "dispatch": {
+      try {
+        checkSkills();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        throw new UsageError(
+          `taskferry's own skill files are out of sync: ${message}`,
+          "Run `npm run skill:generate` in the taskferry repo, then retry dispatch"
+        );
+      }
       const directory = normalizeDirectory(options.directory || cwd);
       return client.request("task.dispatch", {
         prompt: options.prompt,
@@ -244,7 +254,7 @@ function terminalEventFromStatus(detail) {
   };
 }
 
-function streamTaskEvents({ client, io, signal, directory, taskId, summaries, format, originSessionId }) {
+function streamTaskEvents({ client, io, signal, directory, taskId, summaries, format }) {
   let settle;
   let abortHandler;
   const finished = new Promise((resolve, reject) => {
@@ -260,7 +270,7 @@ function streamTaskEvents({ client, io, signal, directory, taskId, summaries, fo
       return;
     }
     signal?.addEventListener("abort", abortHandler, { once: true });
-    Promise.resolve(client.subscribe({ directory, ...(summaries ? { summaries: true } : {}), ...(originSessionId ? { originSessionId } : {}) }, (event) => {
+    Promise.resolve(client.subscribe({ directory, ...(summaries ? { summaries: true } : {}) }, (event) => {
       if (taskId && event.taskId !== taskId) return;
       io.stdout.write(`${formatWatchEvent(event, format, io.stdout.isTTY)}\n`);
       if (taskId && TERMINAL_STATUSES.has(event.status)) {
@@ -303,7 +313,6 @@ async function watchCommand(options, { client, io, signal, cwd }) {
     taskId: options.taskId,
     summaries: options.summaries,
     format: options.format,
-    originSessionId: options.originSessionId,
   }).finally(() => {
     if (client.close) client.close();
   });
