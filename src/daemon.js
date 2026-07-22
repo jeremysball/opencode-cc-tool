@@ -278,7 +278,7 @@ export async function startDaemon({
       writeMessage(subscription.socket, eventMessage(subscriptionId, event));
     }
   };
-  const manager = taskManagerFactory({ ...taskManagerOptions, stateDir, onEvent });
+  const manager = taskManagerFactory({ ...taskManagerOptions, stateDir, runtimeDir, onEvent });
   const startupSourceSignature = sourceSignature(sourceDir);
   let restartPending = false;
   let restarting = false;

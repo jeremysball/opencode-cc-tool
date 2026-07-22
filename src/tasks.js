@@ -1,6 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { createTaskEvents } from "./events.js";
@@ -11,6 +12,7 @@ import { RESULT_FIELDS } from "./protocol.js";
 import { formatToolEventForNarration } from "./narration-format.js";
 import { errCode } from "./errors.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
+import { buildBwrapArgs, checkBwrapAvailable, platformSupportsSandbox } from "./sandbox.js";
 
 /**
  * @typedef {object} SummaryOf
@@ -71,6 +73,7 @@ import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
  * @property {string|null} [failureReason]
  * @property {string|null} [failureDetail]
  * @property {string|null} [keySlot]
+ * @property {string|null} [spawnError]
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
  */
@@ -94,6 +97,7 @@ import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
  * @property {string|null} variant
  * @property {string|null|undefined} [sessionId]
  * @property {string|null} [keyEnvValue]
+ * @property {boolean} [noSandbox]
  * @property {undefined} [kind]
  * @property {undefined} [snapshotPath]
  */
@@ -348,6 +352,10 @@ const WATCHDOG_KILL_GRACE_MS = 5000;
  * @param {number} [options.summarizerTimeoutMs]
  * @param {string} [options.activitySummaryModel]
  * @param {number} [options.activityMaxWords]
+ * @param {NodeJS.Platform} [options.platform]
+ * @param {boolean} [options.sandboxEnabled]
+ * @param {() => {checked: boolean, available: boolean, reason?: string}} [options.checkBwrapAvailableFn]
+ * @param {string} [options.runtimeDir]
  * @param {(event: object) => void} [options.onEvent]
  */
 // Factory rather than a module-level singleton, so tests can construct an
@@ -424,6 +432,12 @@ export function createTaskManager({
     Number(process.env.TASKFERRY_ACTIVITY_MAX_WORDS),
     positiveInteger(/** @type {number} */ (config.activityMaxWords), 75)
   ),
+  platform = process.platform,
+  sandboxEnabled = process.env.TASKFERRY_DISABLE_SANDBOX !== undefined
+    ? !["1", "true"].includes(process.env.TASKFERRY_DISABLE_SANDBOX)
+    : (/** @type {boolean|undefined} */ (config.sandboxEnabled) ?? true),
+  checkBwrapAvailableFn = checkBwrapAvailable,
+  runtimeDir = path.join(stateDir, "run"),
   onEvent,
 } = {}) {
   const LOG_DIR = path.join(stateDir, "logs");
@@ -446,6 +460,20 @@ export function createTaskManager({
     eventSequence = Math.max(eventSequence, /** @type {{sequence: number}} */ (event).sequence);
     if (onEvent) onEvent(event);
   });
+
+  /** @type {{checked: boolean, available: boolean, reason?: string}|null} */
+  let bwrapAvailable = null;
+  function requireBwrap() {
+    if (bwrapAvailable == null) {
+      bwrapAvailable = checkBwrapAvailableFn();
+    }
+    if (!bwrapAvailable.available) {
+      throw new Error(
+        "error: bwrap is required for sandboxing but was not found\n" +
+        "help: install bubblewrap (e.g. apt install bubblewrap) or opt out with --no-sandbox or TASKFERRY_DISABLE_SANDBOX=1"
+      );
+    }
+  }
 
   function environmentWithoutKeySlotSources() {
     const env = { ...process.env };
@@ -693,11 +721,12 @@ export function createTaskManager({
    * @returns {TaskSummary}
    */
   function summarize(task) {
-    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, keySlot, incomplete, finalMarker } = task;
+    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, keySlot, incomplete, finalMarker, spawnError } = task;
     return {
       id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath,
       ...failureFields(task),
       keySlot: keySlot ?? null,
+      spawnError: spawnError ?? null,
       promptPreview,
       ...(promptTotalChars != null ? { promptTotalChars } : {}),
       ...(task.summaryOf ? { summaryOf: task.summaryOf } : {}),
@@ -782,9 +811,10 @@ export function createTaskManager({
    * @param {string|null} [params.keySlot]
    * @param {boolean} [params.internal]
    * @param {string|null} [params.finalMarker]
+   * @param {boolean} [params.noSandbox]
    * @returns {TaskSummary & {next: string}}
    */
-  function dispatch({ prompt, directory, model, variant, sessionId, keySlot, internal = false, finalMarker = null, originSessionId }) {
+  function dispatch({ prompt, directory, model, variant, sessionId, keySlot, internal = false, finalMarker = null, originSessionId, noSandbox = false }) {
     ensureStateLoaded();
     if (!prompt || typeof prompt !== "string") {
       throw new Error("error: prompt is required\nhelp: taskferry_dispatch requires a non-empty prompt string");
@@ -843,7 +873,7 @@ export function createTaskManager({
     };
     tasks.set(id, task);
     persistTask(task.id);
-    pendingLaunches.set(id, { prompt, directory: normalizedDirectory, model: resolvedModel, variant: task.variant, sessionId, keyEnvValue: resolvedKeySlot.keyEnvValue });
+    pendingLaunches.set(id, { prompt, directory: normalizedDirectory, model: resolvedModel, variant: task.variant, sessionId, keyEnvValue: resolvedKeySlot.keyEnvValue, noSandbox: noSandbox === true });
     launchQueue.push(id);
     launchQueuedTasks();
 
@@ -1285,11 +1315,20 @@ export function createTaskManager({
     try {
       logFd = fs.openSync(task.logPath, "a", 0o600);
       fs.chmodSync(task.logPath, 0o600);
+      const spawnEnv = isSummary ? summaryLaunch.env : dispatchEnvironment(dispatchLaunch.keyEnvValue);
+      const launchDirectory = isSummary ? SUMMARY_DIR : dispatchLaunch.directory;
+      const noSandbox = !isSummary && dispatchLaunch.noSandbox === true;
+      let spawnCommand = "opencode";
+      let spawnArgs = args;
+      if (sandboxEnabled && !noSandbox && platformSupportsSandbox(platform)) {
+        requireBwrap();
+        spawnCommand = "bwrap";
+        spawnArgs = buildBwrapArgs({ directory: launchDirectory, stateDir, runtimeDir, homeDir: os.homedir() }).concat(["--", "opencode", ...args]);
+      }
       // No tmux: the child has no shared session to introspect. It is its own
       // process group so cancellation can stop any subprocesses it creates.
-      const spawnEnv = isSummary ? summaryLaunch.env : dispatchEnvironment(dispatchLaunch.keyEnvValue);
-      child = spawnFn("opencode", args, {
-        cwd: isSummary ? SUMMARY_DIR : dispatchLaunch.directory,
+      child = spawnFn(spawnCommand, spawnArgs, {
+        cwd: launchDirectory,
         stdio: ["ignore", logFd, logFd],
         detached: true,
         env: spawnEnv,

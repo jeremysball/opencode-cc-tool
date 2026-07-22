@@ -23,6 +23,7 @@ function temporaryPaths(t) {
 
 function fakeManagerFactory(tasks = [], { checkSummaryModelReady } = {}) {
   let onEvent;
+  let capturedOptions;
   const calls = [];
   const byId = new Map(tasks.map((task) => [task.id, task]));
   const manager = {
@@ -76,12 +77,16 @@ function fakeManagerFactory(tasks = [], { checkSummaryModelReady } = {}) {
 
   return {
     factory(options) {
+      capturedOptions = options;
       onEvent = options.onEvent;
       return manager;
     },
     calls,
     emit(event) {
       onEvent(event);
+    },
+    get options() {
+      return capturedOptions;
     },
   };
 }
@@ -164,6 +169,15 @@ describe("Unix socket daemon", () => {
     assert.deepEqual(health.result, { healthy: true, pid: process.pid, version: 1 });
     assert.equal(dispatched.result.id, "new-task");
     assert.deepEqual(fake.calls.at(-1), ["dispatch", { prompt: "hello", directory: paths.root }]);
+  });
+
+  test("passes runtimeDir through to the task manager factory", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+    t.after(() => daemon.close());
+
+    assert.equal(fake.options.runtimeDir, paths.runtimeDir);
   });
 
   test("multiplexes concurrent out-of-order responses on one connection", async (t) => {

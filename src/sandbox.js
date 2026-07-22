@@ -1,10 +1,19 @@
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 
+/**
+ * @param {NodeJS.Platform} [platform]
+ * @returns {boolean}
+ */
 export function platformSupportsSandbox(platform = process.platform) {
   return platform === "linux";
 }
 
+/**
+ * @param {string} command
+ * @param {readonly string[]} args
+ * @returns {{status: number|null, stdout: string, stderr: string, error?: NodeJS.ErrnoException}}
+ */
 export function defaultRunCommand(command, args) {
   const result = spawnSync(command, args, { encoding: "utf8", timeout: 5000 });
   if (result.error) {
@@ -13,6 +22,10 @@ export function defaultRunCommand(command, args) {
   return { status: result.status, stdout: result.stdout || "", stderr: result.stderr || "", error: result.error };
 }
 
+/**
+ * @param {(command: string, args: readonly string[]) => {status: number|null, stdout: string, stderr: string, error?: NodeJS.ErrnoException}} [runCommand]
+ * @returns {{checked: boolean, available: boolean, reason?: string}}
+ */
 export function checkBwrapAvailable(runCommand = defaultRunCommand) {
   const result = runCommand("bwrap", ["--version"]);
   if (result.error) {
@@ -28,6 +41,11 @@ export function checkBwrapAvailable(runCommand = defaultRunCommand) {
   return { checked: true, available: true };
 }
 
+/**
+ * @param {string} homeDir
+ * @param {string} stateDir
+ * @returns {string[]}
+ */
 function defaultDenyList(homeDir, stateDir) {
   return [
     stateDir,
@@ -39,6 +57,15 @@ function defaultDenyList(homeDir, stateDir) {
   ];
 }
 
+/**
+ * @param {object} options
+ * @param {string} options.directory
+ * @param {string} options.stateDir
+ * @param {string} options.runtimeDir
+ * @param {string} options.homeDir
+ * @param {string[]} [options.denyList]
+ * @returns {string[]}
+ */
 export function buildBwrapArgs({ directory, stateDir, runtimeDir, homeDir, denyList = defaultDenyList(homeDir, stateDir) }) {
   const args = ["--ro-bind", "/", "/"];
   for (const denied of denyList) {
