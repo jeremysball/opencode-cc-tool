@@ -474,7 +474,7 @@ test("summary --wait reports a not-settled note instead of summarizing when the 
     next: 'Run taskferry wait or taskferry status with task id "oc_1" to check progress; pass --full for directory/model/log path details',
     note: 'Task has not settled yet (status: running); run taskferry summary --wait again to keep waiting, or omit --wait to summarize the in-progress task',
   });
-  assert.deepEqual(calls, [{ method: "task.wait", params: { taskId: "oc_1" } }]);
+  assert.deepEqual(calls, [{ method: "task.wait", params: { taskId: "oc_1", timeoutMs: 900000 } }]);
 });
 
 test("summary --wait proceeds to summarize once task.wait reports a settled status", async () => {
@@ -488,7 +488,7 @@ test("summary --wait proceeds to summarize once task.wait reports a settled stat
   assert.equal(result.exitCode, 0);
   assert.deepEqual(capture.output().value, { text: "it worked" });
   assert.deepEqual(calls, [
-    { method: "task.wait", params: { taskId: "oc_1" } },
+    { method: "task.wait", params: { taskId: "oc_1", timeoutMs: 900000 } },
     { method: "task.summary", params: { taskId: "oc_1" } },
   ]);
 });

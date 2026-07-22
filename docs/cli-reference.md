@@ -72,21 +72,25 @@ finish, are cancelled, fail to spawn, or hit the no-output watchdog. See
 
 ## `taskferry wait <id> [options]`
 
-Blocks until the task's real `exit` event fires. With no `--timeout-ms`,
-this call has no cap and returns only once the task settles. Pass
-`--timeout-ms` to opt into an early return before that; the call then
-returns after that many milliseconds even if the task is still running.
+Blocks until the task's real `exit` event fires. A 15-minute default
+timeout (configurable via `TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS`) prevents
+indefinite hangs on stuck tasks. Pass `--timeout-ms` to override the
+default cap; the call then returns after that many milliseconds even if
+the task is still running. Set `TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS=0` to
+disable the default timeout entirely (old behavior).
 
 | Flag | Notes |
 |---|---|
-| `--timeout-ms <number>` | Optional early-return cap in milliseconds; omit to block until settlement |
+| `--timeout-ms <number>` | Override the default timeout cap in milliseconds; omit to use the 15-minute default |
 | `--tail-chars <number>` | Include this many trailing narration characters if the task is still running when the timeout elapses |
 | `--full` | Include directory, model, session id, log path, and prompt preview |
 | `--summarize` | Stream periodic live summaries to stdout while waiting; exits and returns the normal result the moment the task settles. Cannot combine with `--timeout-ms` or `--tail-chars`. |
 
-If it returns `status: "queued"` or `"running"`, an explicit `--timeout-ms`
-elapsed before the task settled; call `wait` again. This command was named
-`poll` before the AXI CLI; `taskferry poll` now fails with a rename notice.
+If it returns `status: "queued"` or `"running"`, the timeout elapsed
+before the task settled; a `note` field explains the situation. Call `wait`
+again to keep polling, or pass `--timeout-ms` for a longer cap. This
+command was named `poll` before the AXI CLI; `taskferry poll` now fails
+with a rename notice.
 
 ```
 $ taskferry wait oc_mrn4ipkp_19450105 --timeout-ms 30000

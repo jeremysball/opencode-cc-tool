@@ -14,6 +14,25 @@ import { defaultRunCommandAsync as defaultShellRunner, pluginInstalled } from ".
 import { checkClaudeCodePlaywrightIsolation, checkOpencodePlaywrightIsolation } from "./mcp-isolation.js";
 import { checkBwrapAvailableAsync } from "./sandbox.js";
 
+// Default timeout for the CLI `wait` command (and `summary --wait`) when no
+// explicit --timeout-ms is given. Kept generous (15 min) so real tasks aren't
+// cut off, but finite so a hung task doesn't block the caller forever. The
+// 45 s MAX_WAIT_MS in tasks.js is for advisor's internal polling — a different,
+// much shorter-lived use case.
+const DEFAULT_WAIT_TIMEOUT_MS = 900000;
+
+/**
+ * Resolve the effective default wait timeout: explicit env var override, or the
+ * built-in default. Returns `null` when the env var is set to "0" (opt-out).
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {number|null}
+ */
+function resolveWaitDefaultTimeoutMs(env) {
+  if (env.TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS === "0") return null;
+  const envMs = Number(env.TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS);
+  return Number.isFinite(envMs) && envMs > 0 ? envMs : DEFAULT_WAIT_TIMEOUT_MS;
+}
+
 // Checked from `doctor` so a missing Claude plugin install surfaces as an
 // explicit warning instead of silent absence: without it, `claude-monitor`
 // notifications (see docs/cli-reference.md) never fire and nothing else says
@@ -102,9 +121,10 @@ export async function runCommand(command, options, { client, io = process, signa
         const detail = await client.request("task.status", { taskId: options.taskId });
         return leanStatus(detail, { full: options.full });
       }
+      const waitTimeoutMs = options.timeoutMs ?? resolveWaitDefaultTimeoutMs(env);
       const detail = await client.request("task.wait", {
         taskId: options.taskId,
-        ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+        ...(waitTimeoutMs != null ? { timeoutMs: waitTimeoutMs } : {}),
         ...(options.tailChars === undefined ? {} : { tailChars: options.tailChars }),
       });
       return leanStatus(detail, { full: options.full });
@@ -131,7 +151,11 @@ export async function runCommand(command, options, { client, io = process, signa
       });
     case "summary": {
       if (options.wait) {
-        const waited = await client.request("task.wait", { taskId: options.taskId });
+        const waitTimeoutMs = resolveWaitDefaultTimeoutMs(env);
+        const waited = await client.request("task.wait", {
+          taskId: options.taskId,
+          ...(waitTimeoutMs != null ? { timeoutMs: waitTimeoutMs } : {}),
+        });
         if (waited.status === "running" || waited.status === "queued") {
           return {
             ...leanStatus(waited, { full: options.full }),
