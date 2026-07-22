@@ -484,6 +484,65 @@ describe("bwrap sandboxing", () => {
   });
 });
 
+describe("dispatch() with a prompt over the argv-safe size (issue #78: spawn E2BIG)", () => {
+  test("a prompt at or under the argv-safe threshold is still passed inline, no -f attachment", () => {
+    let captured = null;
+    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { captured = { args, opts }; return fakeChild(); } });
+    const prompt = "x".repeat(96 * 1024);
+
+    mgr.dispatch({ prompt, directory: os.tmpdir() });
+
+    assert.equal(captured.args.includes("-f"), false);
+    assert.equal(captured.args[captured.args.length - 1], prompt);
+  });
+
+  test("a prompt over the argv-safe threshold is written to a scratch file and attached via -f, never appearing in argv", () => {
+    let captured = null;
+    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { captured = { args, opts }; return fakeChild(); } });
+    const prompt = "x".repeat(96 * 1024 + 1);
+
+    mgr.dispatch({ prompt, directory: os.tmpdir() });
+
+    assert.ok(captured.args.includes("-f"), "expected -f attachment flag in argv");
+    const attachment = captured.args[captured.args.indexOf("-f") + 1];
+    assert.equal(fs.readFileSync(attachment, "utf8"), prompt);
+    assert.equal(fs.statSync(attachment).mode & 0o777, 0o600);
+    assert.ok(!captured.args.includes(prompt), "the raw oversized prompt must never be passed as a single argv element");
+    // A short instruction still follows "--" so opencode has a message, per its own CLI contract.
+    assert.equal(captured.args[captured.args.length - 2], "--");
+    assert.match(captured.args[captured.args.length - 1], /attached/i);
+  });
+
+  test("the scratch prompt file is deleted once the task settles", () => {
+    const child = fakeChild();
+    let captured = null;
+    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { captured = { args, opts }; return child; } });
+    const prompt = "x".repeat(96 * 1024 + 1);
+
+    mgr.dispatch({ prompt, directory: os.tmpdir() });
+    const attachment = captured.args[captured.args.indexOf("-f") + 1];
+    assert.ok(fs.existsSync(attachment));
+
+    child.emit("exit", 0, null);
+
+    assert.equal(fs.existsSync(attachment), false);
+  });
+
+  test("the scratch prompt file is deleted even when the spawned child errors before exiting", () => {
+    const child = fakeChild();
+    let captured = null;
+    const mgr = makeManager({ spawnFn: (cmd, args, opts) => { captured = { args, opts }; return child; } });
+    const prompt = "x".repeat(96 * 1024 + 1);
+
+    mgr.dispatch({ prompt, directory: os.tmpdir() });
+    const attachment = captured.args[captured.args.indexOf("-f") + 1];
+
+    child.emit("error", new Error("spawn opencode ENOENT"));
+
+    assert.equal(fs.existsSync(attachment), false);
+  });
+});
+
 describe("output-completeness check at settlement time (issue #35)", () => {
   function writeLog(logPath, lines) {
     fs.mkdirSync(path.dirname(logPath), { recursive: true });
@@ -1484,6 +1543,82 @@ describe("provider-failure classification", () => {
     child.emit("exit", null, "SIGTERM");
     const s = mgr.status(dispatched.id, { full: true });
     assert.equal(s.failureReason, "rate_limited", "the first classification wins");
+    assert.equal(s.failureDetail, "rate_limit_exceeded: please retry after 60s");
+  });
+});
+
+describe("trailing provider-error events that land after the last watcher poll (issue #81)", () => {
+  test("a provider-error event written just before exit -- with no watcher tick in between -- is still classified instead of lost", () => {
+    const child = fakeChild(7201);
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: () => {},
+      // Long enough that the watchdog interval never ticks during this test.
+      watchdogPollMs: 60000,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      JSON.stringify({ type: "error", message: "usage_limit_exceeded: monthly quota reached" }) + "\n"
+    );
+
+    // The provider process exits immediately after logging the error --
+    // no interval tick ever gets a chance to read it.
+    child.emit("exit", 1, null);
+
+    const s = mgr.status(dispatched.id, { full: true });
+    assert.equal(s.status, "crashed");
+    assert.equal(s.failureReason, "rate_limited");
+    assert.equal(s.failureDetail, "usage_limit_exceeded: monthly quota reached");
+  });
+
+  test("a trailing provider-error event is classified even when the child traps the signal-less exit and exits 0", () => {
+    const child = fakeChild(7202);
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: () => {},
+      watchdogPollMs: 60000,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      JSON.stringify({ type: "error", message: "Unauthorized: invalid API key provided" }) + "\n"
+    );
+
+    child.emit("exit", 0, null);
+
+    const s = mgr.status(dispatched.id, { full: true });
+    assert.equal(s.status, "crashed");
+    assert.equal(s.failureReason, "authentication_failed");
+  });
+
+  test("does not override a failureReason the watcher already classified while the task was still running", async () => {
+    const child = fakeChild(7203);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 60000,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }) + "\n"
+    );
+    await new Promise((r) => setTimeout(r, 40));
+    assert.ok(killed.some((k) => k.signal === "SIGTERM"));
+
+    // A second, different diagnostic lands right at exit -- the earlier,
+    // watcher-classified reason must still win.
+    fs.appendFileSync(
+      mgr.status(dispatched.id).logPath,
+      JSON.stringify({ type: "error", message: "Unauthorized: invalid API key provided" }) + "\n"
+    );
+    child.emit("exit", null, "SIGTERM");
+
+    const s = mgr.status(dispatched.id, { full: true });
+    assert.equal(s.failureReason, "rate_limited");
     assert.equal(s.failureDetail, "rate_limit_exceeded: please retry after 60s");
   });
 });
@@ -2881,5 +3016,56 @@ describe("key slots (dispatch)", () => {
 
     assert.equal(capturedOpts.env.OPENCODE_GO_API_KEY, "sk-default-secret-value");
     assert.equal("AXI_TEST_KEY_BACKUP" in capturedOpts.env, false);
+  });
+});
+
+describe("credential preflight for the dispatched model's own provider (issue #63)", () => {
+  test("fails fast, before spawning, when the model's provider matches the configured provider key env and no value resolves for it", () => {
+    delete process.env.OPENROUTER_API_KEY;
+    const mgr = makeManager({
+      spawnFn: () => { throw new Error("must not spawn"); },
+      providerKeyEnvName: "OPENROUTER_API_KEY",
+    });
+    assert.throws(
+      () => mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: "openrouter/meta/muse-spark-1.1" }),
+      /error: no credentials available for openrouter \(OPENROUTER_API_KEY is not set\)/
+    );
+  });
+
+  test("does not preflight-check a model from a different provider than the configured provider key env", () => {
+    delete process.env.OPENROUTER_API_KEY;
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args) => { captured = args; return fakeChild(); },
+      providerKeyEnvName: "OPENROUTER_API_KEY",
+    });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: "opencode/free-model" });
+    assert.ok(captured, "spawn should have been called for an unrelated provider");
+  });
+
+  test("succeeds once the matching provider key is set in the daemon's ambient environment", (t) => {
+    process.env.OPENROUTER_API_KEY = "sk-openrouter-secret-value";
+    t.after(() => delete process.env.OPENROUTER_API_KEY);
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = opts; return fakeChild(); },
+      providerKeyEnvName: "OPENROUTER_API_KEY",
+    });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: "openrouter/meta/muse-spark-1.1" });
+    assert.equal(captured.env.OPENROUTER_API_KEY, "sk-openrouter-secret-value");
+  });
+
+  test("succeeds when a key_slot supplies the matching provider key even with no ambient value", (t) => {
+    delete process.env.OPENROUTER_API_KEY;
+    process.env.AXI_TEST_OPENROUTER_SLOT = "sk-slotted-secret-value";
+    t.after(() => delete process.env.AXI_TEST_OPENROUTER_SLOT);
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = opts; return fakeChild(); },
+      providerKeyEnvName: "OPENROUTER_API_KEY",
+      keySlotsSpec: "primary:AXI_TEST_OPENROUTER_SLOT",
+    });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: "openrouter/meta/muse-spark-1.1", keySlot: "primary" });
+    assert.equal(captured.env.OPENROUTER_API_KEY, "sk-slotted-secret-value");
   });
 });

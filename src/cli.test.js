@@ -6,18 +6,36 @@ import os from "node:os";
 import path from "node:path";
 import { decode } from "@toon-format/toon";
 import { fileURLToPath } from "node:url";
+import { Readable } from "node:stream";
 import { runCli } from "./cli.js";
 
-function capturedIo() {
+function capturedIo({ stdin } = {}) {
   let stdout = "";
   let stderr = "";
   return {
     io: {
       stdout: { write: (text) => { stdout += text; } },
       stderr: { write: (text) => { stderr += text; } },
+      ...(stdin !== undefined ? { stdin } : {}),
     },
     output: () => ({ stdout, stderr, value: decode(stdout.trim()) }),
   };
+}
+
+// A piped (non-TTY) stdin: Readable.from() makes it async-iterable, matching
+// what runCli's `for await (const chunk of io.stdin)` consumes.
+function fakePipedStdin(content) {
+  const stream = Readable.from([content]);
+  stream.isTTY = false;
+  return stream;
+}
+
+// An interactive (TTY) stdin with nothing piped into it -- runCli must reject
+// `--prompt -` here rather than hang waiting for input that will never come.
+function fakeTtyStdin() {
+  const stream = Readable.from([]);
+  stream.isTTY = true;
+  return stream;
 }
 
 function fakeClient(responses = {}) {
@@ -90,6 +108,66 @@ test("rewrites daemon-era next and help hints at the CLI output boundary", async
 
   assert.equal(result.exitCode, 0);
   assert.equal(capture.output().value.next, 'Run taskferry wait or taskferry status with task id "oc_1"');
+});
+
+test("dispatch --prompt - reads the prompt from piped stdin, stripping one trailing newline", async () => {
+  const capture = capturedIo({ stdin: fakePipedStdin("large prompt content\n") });
+  const { client, calls } = fakeClient({
+    "task.dispatch": { id: "oc_1", status: "queued" },
+  });
+  const result = await runCli(["dispatch", "--prompt", "-"], {
+    io: capture.io,
+    connectClient: async () => client,
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(calls[0].params.prompt, "large prompt content");
+});
+
+test("advisor --prompt - reads the prompt from piped stdin", async () => {
+  const capture = capturedIo({ stdin: fakePipedStdin("advisor question\n") });
+  const { client, calls } = fakeClient({
+    "task.advisor": { id: "oc_1", status: "queued" },
+  });
+  const result = await runCli(["advisor", "--prompt", "-", "--model", "opencode/some-model"], {
+    io: capture.io,
+    connectClient: async () => client,
+  });
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(calls[0].params.prompt, "advisor question");
+});
+
+test("dispatch --prompt - rejects with a usage error and never contacts the daemon when stdin is a TTY", async () => {
+  let connected = false;
+  const capture = capturedIo({ stdin: fakeTtyStdin() });
+  const result = await runCli(["dispatch", "--prompt", "-"], {
+    io: capture.io,
+    connectClient: async () => {
+      connected = true;
+      throw new Error("must not connect");
+    },
+  });
+
+  assert.equal(result.exitCode, 2);
+  assert.equal(connected, false);
+  assert.match(capture.output().value.error, /stdin/i);
+});
+
+test("dispatch --prompt - rejects with a usage error when piped stdin is empty", async () => {
+  let connected = false;
+  const capture = capturedIo({ stdin: fakePipedStdin("") });
+  const result = await runCli(["dispatch", "--prompt", "-"], {
+    io: capture.io,
+    connectClient: async () => {
+      connected = true;
+      throw new Error("must not connect");
+    },
+  });
+
+  assert.equal(result.exitCode, 2);
+  assert.equal(connected, false);
+  assert.match(capture.output().value.error, /empty/i);
 });
 
 test("no arguments show executable, description, workspace tasks, counts, and next actions", async () => {

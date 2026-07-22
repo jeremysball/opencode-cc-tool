@@ -46,7 +46,7 @@ a background child process and returns a task summary immediately.
 
 | Flag | Notes |
 |---|---|
-| `--prompt <text>` | Required |
+| `--prompt <text>` | Required. Pass `-` to read the prompt from piped stdin instead (`cat prompt.txt \| taskferry dispatch --prompt -`) — use this for prompts too large to pass as a single command-line argument |
 | `--directory <path>` | Defaults to the current workspace; must be an absolute, existing directory |
 | `--model <id>` | `provider/model`, e.g. `opencode-go/minimax-m3`. Run `opencode models` to list installed models. Defaults to `openai/gpt-5.6-luna` at variant `high` |
 | `--variant <name>` | Reasoning-effort override (`high`, `max`, `minimal`, ...), applied only alongside `--model` |
@@ -113,7 +113,7 @@ planning or hard-debugging help mid-task, not for open-ended background work
 
 | Flag | Notes |
 |---|---|
-| `--prompt <text>` | Required |
+| `--prompt <text>` | Required. Pass `-` to read the prompt from piped stdin instead, same as `dispatch` |
 | `--model <id>` | Required, no default; the caller picks the advisor |
 | `--directory <path>` | Defaults to the current workspace |
 | `--variant <name>` | Optional reasoning-effort override |
