@@ -2004,19 +2004,45 @@ export function createTaskManager({
    * @returns {string|null}
    */
   function readSessionIdFromLog(logPath) {
+    const CHUNK_SIZE = 64 * 1024;
+    let fd;
     try {
-      const lines = fs.readFileSync(logPath, "utf8").split("\n");
-      for (const line of lines) {
-        if (!line.trim()) continue;
+      fd = fs.openSync(logPath, "r");
+    } catch {
+      return null;
+    }
+    try {
+      let carry = "";
+      const buf = Buffer.alloc(CHUNK_SIZE);
+      for (;;) {
+        const bytesRead = fs.readSync(fd, buf, 0, CHUNK_SIZE, null);
+        if (bytesRead === 0) break;
+        carry += buf.toString("utf8", 0, bytesRead);
+        let nl;
+        while ((nl = carry.indexOf("\n")) !== -1) {
+          const line = carry.slice(0, nl);
+          carry = carry.slice(nl + 1);
+          if (!line.trim()) continue;
+          try {
+            const evt = JSON.parse(line);
+            if (evt.sessionID) return evt.sessionID;
+          } catch {
+            continue;
+          }
+        }
+      }
+      if (carry.trim()) {
         try {
-          const evt = JSON.parse(line);
+          const evt = JSON.parse(carry);
           if (evt.sessionID) return evt.sessionID;
         } catch {
-          continue;
+          // trailing partial/malformed line, ignore
         }
       }
     } catch {
       return null;
+    } finally {
+      fs.closeSync(fd);
     }
     return null;
   }
