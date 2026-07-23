@@ -230,24 +230,26 @@ function capDetail(text) {
 // false-positive surface (GLM-5.2 review of 0d944df..4e75129, finding 1).
 /**
  * @param {string[]} lines
- * @returns {{bucket: string, detail: string} | null}
+ * @returns {{failure: {bucket: string, detail: string} | null, hasParseableLine: boolean}}
  */
 function classifyProviderFailure(lines) {
+  let hasParseableLine = false;
   for (const line of lines) {
     if (!line.trim()) continue;
     let evt;
     try {
       evt = JSON.parse(line);
+      hasParseableLine = true;
     } catch {
       for (const [bucket, patterns] of PROVIDER_FAILURE_BUCKETS) {
-        if (patterns.some((pattern) => pattern.test(line))) return { bucket, detail: capDetail(line) };
+        if (patterns.some((pattern) => pattern.test(line))) return { failure: { bucket, detail: capDetail(line) }, hasParseableLine };
       }
       continue;
     }
     if (evt.type !== "error") continue;
     const text = typeof evt.message === "string" ? evt.message : JSON.stringify(evt);
     for (const [bucket, patterns] of PROVIDER_FAILURE_BUCKETS) {
-      if (patterns.some((pattern) => pattern.test(text))) return { bucket, detail: capDetail(text) };
+      if (patterns.some((pattern) => pattern.test(text))) return { failure: { bucket, detail: capDetail(text) }, hasParseableLine };
     }
     // A structured `type:"error"` event is never noise -- unlike the raw
     // non-JSON line branch above, this is opencode's own error signal, so an
@@ -260,11 +262,14 @@ function classifyProviderFailure(lines) {
     const errorName = typeof evt.error?.name === "string" ? evt.error.name : "error";
     const errorMessage = typeof evt.error?.data?.message === "string" ? evt.error.data.message : text;
     return {
-      bucket: `opencode_${errorName.replace(/[^a-zA-Z0-9]+/g, "_").toLowerCase()}`,
-      detail: capDetail(errorMessage),
+      failure: {
+        bucket: `opencode_${errorName.replace(/[^a-zA-Z0-9]+/g, "_").toLowerCase()}`,
+        detail: capDetail(errorMessage),
+      },
+      hasParseableLine,
     };
   }
-  return null;
+  return { failure: null, hasParseableLine };
 }
 
 const SUMMARY_AGENT_CONFIG = JSON.stringify({
@@ -1754,10 +1759,10 @@ export function createTaskManager({
       text += buf.toString("utf8");
     }
     if (!text) return; // nothing to classify
-    const providerFailure = classifyProviderFailure(text.split("\n"));
-    if (providerFailure) {
-      task.failureReason = providerFailure.bucket;
-      task.failureDetail = providerFailure.detail;
+    const { failure } = classifyProviderFailure(text.split("\n"));
+    if (failure) {
+      task.failureReason = failure.bucket;
+      task.failureDetail = failure.detail;
     }
   }
 
@@ -1811,20 +1816,16 @@ export function createTaskManager({
           const text = carry + buf.toString("utf8");
           const lines = text.split("\n");
           carry = lines.pop() ?? "";
-          const providerFailure = classifyProviderFailure(lines)
-            ?? (carry && !carry.trimStart().startsWith("{") ? classifyProviderFailure([carry]) : null);
+          const linesResult = classifyProviderFailure(lines);
+          const carryResult = !linesResult.failure && carry && !carry.trimStart().startsWith("{")
+            ? classifyProviderFailure([carry])
+            : null;
+          const providerFailure = linesResult.failure ?? carryResult?.failure ?? null;
           if (providerFailure) {
             failRunningTask(current, providerFailure.bucket, providerFailure.detail);
             return;
           }
-          if (lines.some((line) => {
-            try {
-              JSON.parse(line);
-              return true;
-            } catch {
-              return false;
-            }
-          })) {
+          if (linesResult.hasParseableLine) {
             lastActivityMs = Date.now();
             // Latch the budget escalation: once any parseable JSON line has
             // landed for this task, every subsequent tick compares against
