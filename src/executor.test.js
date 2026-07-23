@@ -1,6 +1,49 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { opencodeExecutor, resolveExecutor } from "./executor.js";
+import { opencodeExecutor, piExecutor, resolveExecutor } from "./executor.js";
+
+
+
+describe("piExecutor()", () => {
+  test("exposes pi identity and defaults", () => {
+    const ex = piExecutor();
+    assert.equal(ex.id, "pi");
+    assert.equal(ex.taskIdPrefix, "pi");
+    assert.equal(ex.errorBucketPrefix, "pi");
+    assert.equal(ex.defaultModel, "minimax/MiniMax-M2.7");
+  });
+
+  test("buildSpawnArgs splits provider/model and supports session", () => {
+    const ex = piExecutor();
+    assert.deepEqual(ex.buildSpawnArgs({ isSummary: false, model: "minimax/MiniMax-M2.7", launchDirectory: "/work", promptFilePath: null, prompt: "hi", sessionId: "ses" }), ["--provider", "minimax", "--model", "MiniMax-M2.7", "--mode", "json", "--session", "ses", "-p", "hi"]);
+    assert.deepEqual(ex.buildSpawnArgs({ isSummary: false, model: "gpt-4o", launchDirectory: "/work", promptFilePath: "/p", prompt: "huge", sessionId: null }), ["--model", "gpt-4o", "--mode", "json", "-p", "Follow the instructions in the attached prompt file exactly.", "@/p"]);
+  });
+
+  test("buildSpawnArgs uses snapshot attachment for summaries", () => {
+    const ex = piExecutor();
+    assert.deepEqual(ex.buildSpawnArgs({ isSummary: true, model: "minimax/MiniMax-M2.7", launchDirectory: "/work", snapshotPath: "/s.json", prompt: "", sessionId: null }), ["--provider", "minimax", "--model", "MiniMax-M2.7", "--mode", "json", "-p", ex.buildSummaryPrompt(), "@/s.json"]);
+  });
+
+  test("listModelsFn normalizes pi's padded table output", async () => {
+    const ex = piExecutor({ execFileFn: async () => ({ stdout: "Provider Model\nminimax  MiniMax-M2.7  extra\nopenai  gpt-4o", stderr: "" }) });
+    assert.equal(await ex.listModelsFn({}), "minimax/MiniMax-M2.7\nopenai/gpt-4o");
+  });
+
+  test("sandboxAuthFile binds auth and overrides pi data directory", () => {
+    const ex = piExecutor();
+    assert.deepEqual(ex.sandboxAuthFile({ homeDir: "/home/user", runtimeDir: "/state/run", spawnEnv: { PI_CODING_AGENT_DIR: "/custom/pi" }, existsFn: (p) => p === "/custom/pi/auth.json" }), {
+      extraRoBind: ["/custom/pi/auth.json", "/state/run/pi-data/auth.json"],
+      sandboxedDataHome: "/state/run/pi-data",
+      sandboxEnv: { PI_CODING_AGENT_DIR: "/state/run/pi-data" },
+    });
+  });
+
+  test("sandboxAuthFile falls back to ~/.pi", () => {
+    const ex = piExecutor();
+    const result = ex.sandboxAuthFile({ homeDir: "/home/user", runtimeDir: "/state/run", spawnEnv: {}, existsFn: (p) => p === "/home/user/.pi/auth.json" });
+    assert.deepEqual(result.extraRoBind, ["/home/user/.pi/auth.json", "/state/run/pi-data/auth.json"]);
+  });
+});
 
 describe("opencodeExecutor()", () => {
   test("id/taskIdPrefix/errorBucketPrefix", () => {
@@ -64,6 +107,7 @@ describe("opencodeExecutor()", () => {
     assert.deepEqual(result, {
       extraRoBind: ["/home/user/.local/share/opencode/auth.json", "/state/run/opencode-data/opencode/auth.json"],
       sandboxedDataHome: "/state/run/opencode-data",
+      sandboxEnv: { XDG_DATA_HOME: "/state/run/opencode-data" },
     });
   });
 

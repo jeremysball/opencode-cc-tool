@@ -28,6 +28,80 @@ const SUMMARY_ISOLATION_PROMPT =
   + "changed blocker, or steps completed since then — and say 'no change' in a few words if there is "
   + "none. Never restate anything previous_summary already said.";
 
+/**
+ * @typedef {Object} WorkerExecutor
+ * @property {string} id
+ * @property {string} taskIdPrefix
+ * @property {string} errorBucketPrefix
+ * @property {string} defaultModel
+ * @property {string} defaultSummaryModel
+ * @property {string|null} summaryAgentName
+ * @property {string|null} summaryAgentConfig
+ * @property {string|null} summaryConfigEnvVar
+ * @property {(env: NodeJS.ProcessEnv) => Promise<string>} listModelsFn
+ * @property {(env: NodeJS.ProcessEnv) => Promise<void>} verifySummaryAgentFn
+ * @property {(ctx: SpawnLaunchContext) => string[]} buildSpawnArgs
+ * @property {() => string} buildSummaryPrompt
+ * @property {(parsed: unknown) => unknown} normalizeLogEvent
+ * @property {(args: {homeDir: string, runtimeDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean}) => {extraRoBind: [string, string]|null, sandboxedDataHome: string, sandboxEnv: Record<string, string>}} sandboxAuthFile
+ */
+
+/**
+ * @typedef {Object} SpawnLaunchContext
+ * @property {boolean} isSummary
+ * @property {string} model
+ * @property {string} launchDirectory
+ * @property {string|null} promptFilePath
+ * @property {string} prompt
+ * @property {string|null} sessionId
+ * @property {string} [snapshotPath]
+ * @property {string|null} [variant]
+ */
+
+/** @param {{execFileFn?: typeof execFileAsync}} [options] */
+export function piExecutor({ execFileFn = execFileAsync } = {}) {
+  return {
+    id: "pi",
+    taskIdPrefix: "pi",
+    errorBucketPrefix: "pi",
+    defaultModel: "minimax/MiniMax-M2.7",
+    defaultSummaryModel: "minimax/MiniMax-M2.7",
+    summaryAgentName: null,
+    summaryAgentConfig: null,
+    summaryConfigEnvVar: null,
+    listModelsFn: async (env) => {
+      const stdout = (await execFileFn("pi", ["--list-models"], { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS, env })).stdout;
+      return stdout.split("\n").slice(1).map((line) => line.trim().split(/\s+/).slice(0, 2).join("/")).filter((line) => line !== "/").join("\n");
+    },
+    verifySummaryAgentFn: async () => {},
+    buildSpawnArgs(ctx) {
+      const slash = ctx.model.indexOf("/");
+      const provider = slash === -1 ? null : ctx.model.slice(0, slash);
+      const modelName = slash === -1 ? ctx.model : ctx.model.slice(slash + 1);
+      const args = provider ? ["--provider", provider, "--model", modelName] : ["--model", modelName];
+      args.push("--mode", "json");
+      if (ctx.sessionId) args.push("--session", ctx.sessionId);
+      if (ctx.isSummary) args.push("-p", this.buildSummaryPrompt(), `@${ctx.snapshotPath}`);
+      else if (ctx.promptFilePath) args.push("-p", "Follow the instructions in the attached prompt file exactly.", `@${ctx.promptFilePath}`);
+      else args.push("-p", ctx.prompt);
+      return args;
+    },
+    buildSummaryPrompt() {
+      return SUMMARY_ISOLATION_PROMPT;
+    },
+    normalizeLogEvent: (parsed) => parsed,
+    sandboxAuthFile({ homeDir, runtimeDir, spawnEnv, existsFn }) {
+      const realAuthFile = path.join(spawnEnv.PI_CODING_AGENT_DIR || path.join(homeDir, ".pi"), "auth.json");
+      const sandboxedDataHome = path.join(runtimeDir, "pi-data");
+      return {
+        extraRoBind: existsFn(realAuthFile) ? [realAuthFile, path.join(sandboxedDataHome, "auth.json")] : null,
+        sandboxedDataHome,
+        sandboxEnv: { PI_CODING_AGENT_DIR: sandboxedDataHome },
+      };
+    },
+  };
+}
+
 /** @returns {import("./executor.js").WorkerExecutor} */
 export function opencodeExecutor() {
   return {
@@ -81,6 +155,7 @@ export function opencodeExecutor() {
       return {
         extraRoBind: existsFn(realAuthFile) ? [realAuthFile, path.join(sandboxedDataHome, "opencode", "auth.json")] : null,
         sandboxedDataHome,
+        sandboxEnv: { XDG_DATA_HOME: sandboxedDataHome },
       };
     },
   };
@@ -88,6 +163,6 @@ export function opencodeExecutor() {
 
 export function resolveExecutor(name) {
   if (name === undefined || name === "opencode") return opencodeExecutor();
-  if (name === "pi") throw new Error("piExecutor not yet implemented");
+  if (name === "pi") return piExecutor();
   throw new Error(`unknown executor: ${name}`);
 }
