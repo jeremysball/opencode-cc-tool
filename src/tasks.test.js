@@ -2004,7 +2004,15 @@ describe("trailing provider-error events that land after the last watcher poll (
     fs.appendFileSync(logPath, trailing);
     child.emit("exit", 1, null);
 
-    assert.deepEqual(readCalls, [{ length: Buffer.byteLength(trailing), position: prefixBytes }]);
+    // classifyTrailingLogFailure() reads only the trailing delta; the
+    // remaining two calls are readSessionIdFromLog() scanning the log from
+    // the start for a sessionID (one chunk covers the whole small file here,
+    // plus a terminal zero-byte read that detects EOF).
+    assert.deepEqual(readCalls, [
+      { length: Buffer.byteLength(trailing), position: prefixBytes },
+      { length: 64 * 1024, position: null },
+      { length: 64 * 1024, position: null },
+    ]);
     assert.equal(mgr.status(dispatched.id).failureReason, "rate_limited");
   });
 

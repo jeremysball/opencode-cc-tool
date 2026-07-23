@@ -1,5 +1,5 @@
 import path from "node:path";
-import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
+import { isNonNegativeInteger, isObject, isPositiveInteger } from "./numbers.js";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -48,11 +48,6 @@ export class ProtocolError extends Error {
     this.help = help;
     this.requestId = requestId;
   }
-}
-
-/** @param {unknown} value @returns {value is Record<string, unknown>} */
-function isObject(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 /** @param {unknown} value @returns {value is string} */

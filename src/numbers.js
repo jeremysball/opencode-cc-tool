@@ -1,3 +1,8 @@
+/** @param {unknown} value @returns {value is Record<string, unknown>} */
+export function isObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 /** @param {unknown} value @returns {value is number} */
 export function isPositiveInteger(value) {
   return Number.isSafeInteger(value) && /** @type {number} */ (value) > 0;
