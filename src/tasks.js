@@ -396,7 +396,6 @@ const WATCHDOG_KILL_GRACE_MS = 5000;
 // isolated instance with an injected spawnFn/killFn (no real `opencode`
 // process, no real OS signals) and its own state directory, instead of
 // sharing process-wide state with every other test or the real server.
-// `defaultTaskManager` below is the one real instance server.js uses.
 export function createTaskManager({
   spawnFn = spawn,
   killFn = (pid, signal) => process.kill(pid, signal),
@@ -1691,8 +1690,9 @@ export function createTaskManager({
     stopRunningWatcher(task.id);
     try {
       persistTask(task.id);
-    } catch {
+    } catch (err) {
       // The child still needs stopping if the state directory became unwritable.
+      console.error(`taskferry: failed to persist failing task ${task.id}: ${errMessage(err)}`);
     }
     sendSignal(/** @type {number} */ (task.pid), "SIGTERM");
     const timer = setTimeout(() => {
@@ -1971,15 +1971,15 @@ export function createTaskManager({
    * @param {string} [params.directory]
    * @param {string} [params.model]
    * @param {string} [params.variant]
-   * @param {string} [params.session_id]
-   * @param {number} [params.timeout_ms]
+   * @param {string} [params.sessionId]
+   * @param {number} [params.timeoutMs]
    */
-  async function advisor({ prompt, directory, model, variant, session_id, timeout_ms } = {}) {
+  async function advisor({ prompt, directory, model, variant, sessionId, timeoutMs } = {}) {
     ensureStateLoaded();
     if (!model || typeof model !== "string") {
       throw new Error("error: model is required\nhelp: taskferry_advisor requires a provider/model string, e.g. \"openai/gpt-5.6-sol\"");
     }
-    const resolved = resolveAdvisorSession(session_id);
+    const resolved = resolveAdvisorSession(sessionId);
     /** @type {TaskSummary & {next: string}} */
     let dispatched;
     try {
@@ -1987,7 +1987,7 @@ export function createTaskManager({
     } catch (err) {
       throw new Error(errMessage(err).replaceAll("taskferry_dispatch", "taskferry_advisor"), { cause: err });
     }
-    const settled = await poll(dispatched.id, { timeoutMs: timeout_ms ?? maxWait });
+    const settled = await poll(dispatched.id, { timeoutMs: timeoutMs ?? maxWait });
 
     const resetFields = resolved.reset ? { previous_session_id: resolved.previousSessionId } : {};
 
@@ -2423,8 +2423,3 @@ export function createTaskManager({
     activityCache,
   };
 }
-
-// The one real instance the daemon uses: real spawn, real process.kill,
-// real state directory. Everything else (tests) calls createTaskManager()
-// directly with injected spawnFn/killFn and an isolated stateDir.
-export const defaultTaskManager = createTaskManager();

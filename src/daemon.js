@@ -209,8 +209,8 @@ async function invoke(manager, request) {
         directory: params.directory,
         model: params.model,
         ...(params.variant !== undefined ? { variant: params.variant } : {}),
-        ...(params.sessionId !== undefined ? { session_id: params.sessionId } : {}),
-        ...(params.timeoutMs !== undefined ? { timeout_ms: params.timeoutMs } : {}),
+        ...(params.sessionId !== undefined ? { sessionId: params.sessionId } : {}),
+        ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
       });
     case "task.context": {
       const context = filteredTaskDetails(manager, params.directory);
@@ -389,7 +389,10 @@ export async function startDaemon({
   function close() {
     if (closing) return closing;
     closing = new Promise((resolve, reject) => {
-      for (const socket of clients) socket.destroy();
+      for (const socket of clients) {
+        socket.write(encodeMessage({ version: PROTOCOL_VERSION, type: "shutdown", reason: restarting ? "restart" : "shutdown" }));
+        socket.destroy();
+      }
       server.close((error) => {
         if (error) {
           reject(error);

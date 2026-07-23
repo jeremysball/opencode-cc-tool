@@ -2457,7 +2457,7 @@ describe("advisor()", () => {
       directory: os.tmpdir(),
       model: "openai/gpt-5.6-sol",
       variant: "max",
-      timeout_ms: 5000,
+      timeoutMs: 5000,
     });
 
     assert.deepEqual(captured, [
@@ -2496,7 +2496,7 @@ describe("advisor()", () => {
       prompt: "long question",
       directory: os.tmpdir(),
       model: "openai/gpt-5.6-sol",
-      timeout_ms: 20,
+      timeoutMs: 20,
     });
     const row2 = mgr.list().tasks[0];
     const dispatched = { id: row2.id, logPath: path.join(mgr.paths.LOG_DIR, `${row2.id}.ndjson`) };
@@ -2517,7 +2517,7 @@ describe("advisor()", () => {
       prompt: "long question",
       directory: os.tmpdir(),
       model: "openai/gpt-5.6-sol",
-      timeout_ms: 20,
+      timeoutMs: 20,
     });
     // No log file written at all -- opencode hasn't emitted a session id yet.
 
@@ -2572,7 +2572,7 @@ describe("advisor()", () => {
       prompt: "q2 follow-up",
       directory: os.tmpdir(),
       model: "openai/gpt-5.6-sol",
-      session_id: "ses_live",
+      sessionId: "ses_live",
     });
     assert.equal(captured.includes("--continue"), true);
     assert.equal(captured[captured.indexOf("--session") + 1], "ses_live");
@@ -2608,7 +2608,7 @@ describe("advisor()", () => {
       prompt: "resuming after a nap",
       directory: os.tmpdir(),
       model: "openai/gpt-5.6-sol",
-      session_id: "ses_long_gone",
+      sessionId: "ses_long_gone",
     });
 
     assert.equal(captured.includes("--continue"), false);
