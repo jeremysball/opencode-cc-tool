@@ -229,8 +229,8 @@ function responseError(error, requestId) {
   const lines = text.split("\n");
   const message = lines.find((line) => line.startsWith("error:"))?.slice(6).trim() || lines[0];
   const help = lines.find((line) => line.startsWith("help:"))?.slice(5).trim() || "Retry the request or inspect the daemon logs";
-  const code = /unknown task_id:/.test(text) ? "UNKNOWN_TASK" : "REQUEST_FAILED";
-  return errorResponse(requestId, code, message.replace("unknown task_id:", "unknown task id:"), help);
+  const code = /unknown task id:/.test(text) ? "UNKNOWN_TASK" : "REQUEST_FAILED";
+  return errorResponse(requestId, code, message, help);
 }
 
 export async function startDaemon({
