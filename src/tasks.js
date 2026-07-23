@@ -951,6 +951,7 @@ export function createTaskManager({
 
     const resolvedKeySlot = resolveKeySlot(keySlot);
 
+    // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.
     const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
     const logPath = path.join(LOG_DIR, `${id}.ndjson`);
 
@@ -1314,6 +1315,7 @@ export function createTaskManager({
     const env = summaryEnvironment();
     await Promise.all([summaryModelAvailable(activitySummaryModel, env), verifySummaryAgent(env)]);
 
+    // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.
     const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
     const logPath = path.join(LOG_DIR, `${id}.ndjson`);
     const snapshotPath = path.join(SUMMARY_DIR, `${id}.json`);
