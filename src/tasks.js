@@ -356,7 +356,7 @@ const DEFAULT_WATCHDOG_POLL_MS = positiveInteger(
   Number(process.env.TASKFERRY_WATCHDOG_POLL_MS),
   2000
 );
-const WATCHDOG_KILL_GRACE_MS = 5000;
+const DEFAULT_WATCHDOG_GRACE_MS = 5000;
 
 /**
  * @param {object} [options]
@@ -373,6 +373,7 @@ const WATCHDOG_KILL_GRACE_MS = 5000;
  * @param {number} [options.noOutputTimeoutMs]
  * @param {number} [options.postOutputNoOutputTimeoutMs]
  * @param {number} [options.watchdogPollMs]
+ * @param {number} [options.watchdogGraceMs]
  * @param {number} [options.maxWaitMs]
  * @param {string} [options.keySlotsSpec]
  * @param {string|null} [options.providerKeyEnvName]
@@ -448,6 +449,10 @@ export function createTaskManager({
     positiveInteger(/** @type {number} */ (config.postOutputNoOutputTimeoutMs), DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS)
   ),
   watchdogPollMs = DEFAULT_WATCHDOG_POLL_MS,
+  watchdogGraceMs = positiveInteger(
+    Number(process.env.TASKFERRY_WATCHDOG_GRACE_MS),
+    positiveInteger(/** @type {number} */ (config.watchdogGraceMs), DEFAULT_WATCHDOG_GRACE_MS)
+  ),
   maxWaitMs = MAX_WAIT_MS,
   keySlotsSpec = process.env.TASKFERRY_KEY_SLOTS ?? /** @type {string|undefined} */ (config.keySlots),
   providerKeyEnvName = process.env.TASKFERRY_PROVIDER_KEY_ENV || /** @type {string|undefined} */ (config.providerKeyEnv) || null,
@@ -488,6 +493,7 @@ export function createTaskManager({
   const noOutputTimeout = positiveInteger(noOutputTimeoutMs, DEFAULT_NO_OUTPUT_TIMEOUT_MS);
   const postOutputNoOutputTimeout = positiveInteger(postOutputNoOutputTimeoutMs, DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS);
   const watchdogPoll = positiveInteger(watchdogPollMs, DEFAULT_WATCHDOG_POLL_MS);
+  const watchdogGrace = positiveInteger(watchdogGraceMs, DEFAULT_WATCHDOG_GRACE_MS);
   const maxWait = positiveInteger(maxWaitMs, MAX_WAIT_MS);
   const keySlots = parseKeySlots(keySlotsSpec);
   const summarizerTimeout = nonNegativeInteger(summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS);
@@ -931,7 +937,12 @@ export function createTaskManager({
         throw new Error(`error: --require-final-marker is not a valid RegExp (${errMessage(err)})\nhelp: use standard JS RegExp syntax, e.g. '^Status: (DONE|DONE_WITH_CONCERNS|BLOCKED)$'`, { cause: err });
       }
     }
-    const normalizedDirectory = fs.realpathSync(directory);
+    let normalizedDirectory;
+    try {
+      normalizedDirectory = fs.realpathSync(directory);
+    } catch (err) {
+      throw new Error(`error: directory does not exist: ${directory}\nhelp: check the path or create the directory first (${errMessage(err)})`, { cause: err });
+    }
 
     const resolvedKeySlot = resolveKeySlot(keySlot);
 
@@ -1698,7 +1709,7 @@ export function createTaskManager({
     const timer = setTimeout(() => {
       escalationTimers.delete(task.id);
       if (tasks.get(task.id)?.status === "running") sendSignal(/** @type {number} */ (task.pid), "SIGKILL");
-    }, WATCHDOG_KILL_GRACE_MS);
+    }, watchdogGrace);
     escalationTimers.set(task.id, timer);
   }
 

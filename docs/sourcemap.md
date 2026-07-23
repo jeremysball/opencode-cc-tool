@@ -93,6 +93,7 @@ Vars marked "config.json" also have a config-file equivalent — see
 | `TASKFERRY_NO_OUTPUT_TIMEOUT_MS` | `256000` (~4.3 min) | yes | Pre-output-seen watchdog deadline |
 | `TASKFERRY_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS` | `400000` (~6.7 min) | yes | Watchdog deadline once a task has produced its first log event |
 | `TASKFERRY_WATCHDOG_POLL_MS` | `2000` | no | Watchdog check interval |
+| `TASKFERRY_WATCHDOG_GRACE_MS` | `5000` | yes | SIGTERM→SIGKILL escalation grace period when the watchdog force-stops a task (same override surface as `cancel`'s `--grace-ms`, but for watchdog-triggered stops) |
 | `TASKFERRY_KEY_SLOTS` | — | yes | Named provider-key slot registry; see `docs/security.md` |
 | `TASKFERRY_PROVIDER_KEY_ENV` | — | yes | Source env var a key slot copies from |
 | `TASKFERRY_SUMMARY_MODEL` | `opencode/hy3-free` | yes | Model behind `summary --mode report` |
