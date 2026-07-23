@@ -655,7 +655,7 @@ export function createTaskManager({
    * @param {{force?: boolean}} [options]
    */
   function scheduleActivity(task, { force = false } = {}) {
-    if (typeof onEvent !== "function" || task.internal) return;
+    if (typeof onEvent !== "function" || task.internal) return Promise.resolve();
     const scheduledStatus = task.status;
     const scheduledDirectory = task.directory;
     const baseEvent = () => ({
@@ -685,7 +685,7 @@ export function createTaskManager({
         .then((result) => (result ? { includeSummary, activity: result.activity, outputWatermark: result.outputWatermark } : null))
         .catch((err) => ({ includeSummary, summaryFailed: true, summaryError: errMessage(err) }))
     );
-    void Promise.all(refreshes).then((results) => {
+    return Promise.all(refreshes).then((results) => {
       /** @type {Record<string, {includeSummary?: boolean, activity?: string, outputWatermark?: number, summaryFailed?: boolean, summaryError?: string}>} */
       const activityVariants = {};
       for (const r of results) {
@@ -1522,7 +1522,10 @@ export function createTaskManager({
           // In-memory child settlement is authoritative; a failed best-effort
           // state write must not strand the concurrency slot.
         }
-        scheduleActivity(task, { force: true });
+        // Prune the activity cache only after the terminal snapshot above has
+        // had a chance to land, so `watch --summaries` still sees the final
+        // status transition instead of a cache miss.
+        void scheduleActivity(task, { force: true }).then(() => activityCache.evictTask(task.id));
         try {
           cleanUpScratchFiles();
         } finally {
@@ -1602,7 +1605,7 @@ export function createTaskManager({
       task.endedAt = new Date().toISOString();
       if (child?.pid != null) sendSignal(child.pid, "SIGKILL");
       persistTask(task.id);
-      scheduleActivity(task, { force: true });
+      void scheduleActivity(task, { force: true }).then(() => activityCache.evictTask(task.id));
       cleanUpScratchFiles();
       settleWaiters(task.id);
     }
@@ -1632,7 +1635,7 @@ export function createTaskManager({
       task.status = "cancelled";
       task.endedAt = new Date().toISOString();
       persistTask(task.id);
-      scheduleActivity(task, { force: true });
+      void scheduleActivity(task, { force: true }).then(() => activityCache.evictTask(task.id));
       settleWaiters(taskId);
       if (!launchQueue.length && launchTimer) {
         clearTimeout(launchTimer);
