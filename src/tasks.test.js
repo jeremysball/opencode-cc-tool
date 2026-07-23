@@ -174,6 +174,34 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     assert.deepEqual(captured.slice(6, 10), ["-m", "openai/gpt-5.6-luna", "--variant", "high"]);
   });
 
+  /** @param {string[]} args @param {string} model */
+  function assertDispatchedModel(args, model) {
+    assert.equal(args[args.indexOf("-m") + 1], model);
+  }
+
+  test("resuming with --session-id and no --model inherits the model of the task that owned that session (issue #47)", () => {
+    let captured = null;
+    const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: "opencode-go/minimax-m3", sessionId: "ses_abc" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_abc" });
+    assertDispatchedModel(captured, "opencode-go/minimax-m3");
+  });
+
+  test("resuming with --session-id and an explicit --model still uses the explicit model", () => {
+    let captured = null;
+    const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
+    mgr.dispatch({ prompt: "first", directory: os.tmpdir(), model: "opencode-go/minimax-m3", sessionId: "ses_abc" });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), model: "opencode/other-model", sessionId: "ses_abc" });
+    assertDispatchedModel(captured, "opencode/other-model");
+  });
+
+  test("an unrecognized --session-id with no --model still falls back to the hardcoded default", () => {
+    let captured = null;
+    const mgr = makeManager({ spawnFn: (cmd, args) => { captured = args; return fakeChild(); } });
+    mgr.dispatch({ prompt: "resume", directory: os.tmpdir(), sessionId: "ses_never_seen" });
+    assertDispatchedModel(captured, "openai/gpt-5.6-luna");
+  });
+
   test("a short prompt is returned verbatim in promptPreview, with no promptTotalChars hint", () => {
     const mgr = makeManager({ spawnFn: () => fakeChild() });
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });

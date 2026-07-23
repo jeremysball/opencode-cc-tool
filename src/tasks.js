@@ -954,8 +954,19 @@ export function createTaskManager({
     const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
     const logPath = path.join(LOG_DIR, `${id}.ndjson`);
 
+    // A resume (--session-id with no --model) should inherit the model the
+    // session was actually created under, not silently fall back to the
+    // hardcoded default -- a different model can mean a different provider,
+    // breaking the whole point of resuming that exact session.
+    /** @type {Task|null} */
+    let priorSessionTask = null;
+    if (sessionId) {
+      for (const t of tasks.values()) {
+        if (t.sessionId === sessionId && (!priorSessionTask || t.startedAt > priorSessionTask.startedAt)) priorSessionTask = t;
+      }
+    }
     const usingDefaultModel = !model;
-    const resolvedModel = model || "openai/gpt-5.6-luna";
+    const resolvedModel = model || priorSessionTask?.model || "openai/gpt-5.6-luna";
 
     // Fail fast instead of letting a generic, opaque crash surface from deep
     // inside the spawned opencode child (issue #63). Only applies when this
