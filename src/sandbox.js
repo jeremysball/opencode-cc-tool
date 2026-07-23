@@ -82,18 +82,40 @@ export function defaultDenyList(homeDir, stateDir) {
 }
 
 /**
+ * A git worktree's `.git` is a file pointing at its real gitdir under the
+ * main checkout's `.git/worktrees/<name>` -- outside the worktree's own
+ * directory, so it's invisible to the read-write bind on `directory` alone
+ * and any `git commit`/`git add` inside the sandbox fails with a read-only
+ * filesystem error. `git rev-parse --git-common-dir` resolves the shared
+ * `.git` (objects/refs live there too, so new commits need it writable)
+ * regardless of whether `directory` is a worktree or the main checkout.
+ * @param {string} directory
+ * @param {(command: string, args: readonly string[]) => {status: number|null, stdout: string, stderr: string, error?: NodeJS.ErrnoException}} [runCommand]
+ * @returns {string|null}
+ */
+export function resolveGitCommonDir(directory, runCommand = defaultRunCommand) {
+  const result = runCommand("git", ["-C", directory, "rev-parse", "--git-common-dir"]);
+  if (result.error || result.status !== 0) return null;
+  const raw = result.stdout.trim();
+  if (!raw) return null;
+  return path.resolve(directory, raw);
+}
+
+/**
  * @param {object} options
  * @param {string} options.directory
  * @param {string} options.stateDir
  * @param {string} options.runtimeDir
  * @param {string} options.homeDir
  * @param {string[]} [options.denyList]
+ * @param {string[]} [options.extraRwBinds] - extra directories bound read-write at the same path, applied
+ *   after directory/runtimeDir (e.g. a git worktree's real gitdir, which lives outside `directory`).
  * @param {[string, string][]} [options.extraRoBinds] - extra [src, dest] read-only binds, applied after the
  *   read-write binds so a more specific path (e.g. a single credentials file) can be pinned read-only even
  *   though it sits under an already read-write-bound directory.
  * @returns {string[]}
  */
-export function buildBwrapArgs({ directory, stateDir, runtimeDir, homeDir, denyList = defaultDenyList(homeDir, stateDir), extraRoBinds = [] }) {
+export function buildBwrapArgs({ directory, stateDir, runtimeDir, homeDir, denyList = defaultDenyList(homeDir, stateDir), extraRwBinds = [], extraRoBinds = [] }) {
   const args = ["--ro-bind", "/", "/"];
   // bwrap applies mounts in argument order, and a later mount on a parent
   // directory shadows an earlier mount nested inside it. --tmpfs /tmp must
@@ -106,6 +128,9 @@ export function buildBwrapArgs({ directory, stateDir, runtimeDir, homeDir, denyL
   }
   args.push("--bind", directory, directory);
   args.push("--bind", runtimeDir, runtimeDir);
+  for (const extra of extraRwBinds) {
+    args.push("--bind", extra, extra);
+  }
   for (const [src, dest] of extraRoBinds) {
     args.push("--ro-bind", src, dest);
   }

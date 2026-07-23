@@ -12,7 +12,7 @@ import { RESULT_FIELDS } from "./protocol.js";
 import { formatToolEventForNarration } from "./narration-format.js";
 import { errCode } from "./errors.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
-import { buildBwrapArgs, checkBwrapAvailable, defaultDenyList, platformSupportsSandbox } from "./sandbox.js";
+import { buildBwrapArgs, checkBwrapAvailable, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir } from "./sandbox.js";
 
 /**
  * @typedef {object} SummaryOf
@@ -98,6 +98,7 @@ import { buildBwrapArgs, checkBwrapAvailable, defaultDenyList, platformSupportsS
  * @property {string|null|undefined} [sessionId]
  * @property {string|null} [keyEnvValue]
  * @property {boolean} [noSandbox]
+ * @property {string[]} [allowedDirs]
  * @property {undefined} [kind]
  * @property {undefined} [snapshotPath]
  */
@@ -320,6 +321,28 @@ export function parseKeySlots(spec) {
   return slots;
 }
 
+/**
+ * @param {string|undefined} spec
+ * @returns {string[]}
+ */
+export function parseAllowedDirs(spec) {
+  if (!spec) return [];
+  return spec
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+/**
+ * @param {string} directory
+ * @param {string} candidate
+ * @returns {boolean}
+ */
+export function isOutsideDirectory(directory, candidate) {
+  const rel = path.relative(directory, candidate);
+  return rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel);
+}
+
 const DEFAULT_MAX_DISPATCHES_PER_WINDOW = 2;
 const DEFAULT_DISPATCH_WINDOW_MS = 5000;
 const DEFAULT_MAX_CONCURRENT_TASKS = 4;
@@ -361,6 +384,9 @@ const WATCHDOG_KILL_GRACE_MS = 5000;
  * @param {number} [options.activityMaxWords]
  * @param {NodeJS.Platform} [options.platform]
  * @param {boolean} [options.sandboxEnabled]
+ * @param {string[]} [options.allowedDirs] - extra directories always bound read-write inside the sandbox,
+ *   in addition to the auto-detected git-common-dir for a worktree dispatch directory.
+ * @param {(directory: string) => string|null} [options.resolveGitCommonDirFn]
  * @param {() => {checked: boolean, available: boolean, reason?: string}} [options.checkBwrapAvailableFn]
  * @param {(path: string) => boolean} [options.existsFn]
  * @param {string} [options.runtimeDir]
@@ -444,6 +470,8 @@ export function createTaskManager({
   sandboxEnabled = process.env.TASKFERRY_DISABLE_SANDBOX !== undefined
     ? !["1", "true"].includes(process.env.TASKFERRY_DISABLE_SANDBOX)
     : (/** @type {boolean|undefined} */ (config.sandboxEnabled) ?? true),
+  allowedDirs = parseAllowedDirs(process.env.TASKFERRY_ALLOWED_DIRS ?? /** @type {string|undefined} */ (config.allowedDirs)),
+  resolveGitCommonDirFn = resolveGitCommonDir,
   checkBwrapAvailableFn = checkBwrapAvailable,
   existsFn = fs.existsSync,
   runtimeDir = path.join(stateDir, "run"),
@@ -879,9 +907,11 @@ export function createTaskManager({
    * @param {boolean} [params.internal]
    * @param {string|null} [params.finalMarker]
    * @param {boolean} [params.noSandbox]
+   * @param {string[]} [params.allowedDirs] - extra directories bound read-write for this dispatch only, on
+   *   top of the manager-level default (see createTaskManager's `allowedDirs` option)
    * @returns {TaskSummary & {next: string}}
    */
-  function dispatch({ prompt, directory, model, variant, sessionId, keySlot, internal = false, finalMarker = null, originSessionId, noSandbox = false }) {
+  function dispatch({ prompt, directory, model, variant, sessionId, keySlot, internal = false, finalMarker = null, originSessionId, noSandbox = false, allowedDirs: dispatchAllowedDirs }) {
     ensureStateLoaded();
     if (!prompt || typeof prompt !== "string") {
       throw new Error("error: prompt is required\nhelp: taskferry_dispatch requires a non-empty prompt string");
@@ -953,7 +983,7 @@ export function createTaskManager({
     };
     tasks.set(id, task);
     persistTask(task.id);
-    pendingLaunches.set(id, { prompt, directory: normalizedDirectory, model: resolvedModel, variant: task.variant, sessionId, keyEnvValue: resolvedKeySlot.keyEnvValue, noSandbox: noSandbox === true });
+    pendingLaunches.set(id, { prompt, directory: normalizedDirectory, model: resolvedModel, variant: task.variant, sessionId, keyEnvValue: resolvedKeySlot.keyEnvValue, noSandbox: noSandbox === true, allowedDirs: dispatchAllowedDirs });
     launchQueue.push(id);
     launchQueuedTasks();
 
@@ -1447,7 +1477,21 @@ export function createTaskManager({
           extraRoBinds.push([realAuthFile, path.join(sandboxedDataHome, "opencode", "auth.json")]);
         }
         if (promptFilePath) extraRoBinds.push([PROMPT_DIR, PROMPT_DIR]);
-        spawnArgs = buildBwrapArgs({ directory: launchDirectory, stateDir, runtimeDir, homeDir, denyList, extraRoBinds }).concat(["--", "opencode", ...args]);
+        // A git worktree's real gitdir (objects/refs it shares with the main
+        // checkout, plus its own HEAD/index) lives outside `launchDirectory`
+        // and is otherwise invisible to the read-write bind on it alone --
+        // without this, `git commit` inside the sandbox fails read-only.
+        /** @type {string[]} */
+        const extraRwBinds = [];
+        const gitCommonDir = resolveGitCommonDirFn(launchDirectory);
+        if (gitCommonDir && existsFn(gitCommonDir) && isOutsideDirectory(launchDirectory, gitCommonDir)) {
+          extraRwBinds.push(gitCommonDir);
+        }
+        for (const dir of [...allowedDirs, ...(isSummary ? [] : dispatchLaunch.allowedDirs || [])]) {
+          const resolved = path.isAbsolute(dir) ? dir : path.resolve(launchDirectory, dir);
+          if (existsFn(resolved)) extraRwBinds.push(resolved);
+        }
+        spawnArgs = buildBwrapArgs({ directory: launchDirectory, stateDir, runtimeDir, homeDir, denyList, extraRwBinds, extraRoBinds }).concat(["--", "opencode", ...args]);
         spawnEnv = { ...spawnEnv, XDG_DATA_HOME: sandboxedDataHome };
       }
       // No tmux: the child has no shared session to introspect. It is its own

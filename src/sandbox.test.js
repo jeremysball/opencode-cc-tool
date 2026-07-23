@@ -1,7 +1,7 @@
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
-import { buildBwrapArgs, checkBwrapAvailable, platformSupportsSandbox } from "./sandbox.js";
+import { buildBwrapArgs, checkBwrapAvailable, platformSupportsSandbox, resolveGitCommonDir } from "./sandbox.js";
 
 describe("platformSupportsSandbox()", () => {
   test("is true on linux", () => {
@@ -51,6 +51,32 @@ describe("checkBwrapAvailable()", () => {
     const result = checkBwrapAvailable(runCommand);
     assert.equal(result.available, false);
     assert.match(result.reason, /status 1/);
+  });
+});
+
+describe("resolveGitCommonDir()", () => {
+  test("resolves a worktree's shared .git dir, outside the worktree's own directory", () => {
+    const runCommand = (command, args) => {
+      assert.equal(command, "git");
+      assert.deepEqual(args, ["-C", "/workspace/repo/.worktrees/issue-1", "rev-parse", "--git-common-dir"]);
+      return { status: 0, stdout: "/workspace/repo/.git\n", stderr: "" };
+    };
+    assert.equal(resolveGitCommonDir("/workspace/repo/.worktrees/issue-1", runCommand), "/workspace/repo/.git");
+  });
+
+  test("resolves a relative --git-common-dir output against the given directory", () => {
+    const runCommand = () => ({ status: 0, stdout: ".git\n", stderr: "" });
+    assert.equal(resolveGitCommonDir("/workspace/repo", runCommand), "/workspace/repo/.git");
+  });
+
+  test("returns null when the directory is not a git repo", () => {
+    const runCommand = () => ({ status: 128, stdout: "", stderr: "fatal: not a git repository" });
+    assert.equal(resolveGitCommonDir("/tmp/not-a-repo", runCommand), null);
+  });
+
+  test("returns null when git is not installed", () => {
+    const runCommand = () => ({ status: null, stdout: "", stderr: "", error: /** @type {NodeJS.ErrnoException} */ (Object.assign(new Error("not found"), { code: "ENOENT" })) });
+    assert.equal(resolveGitCommonDir("/workspace/repo", runCommand), null);
   });
 });
 
@@ -137,6 +163,22 @@ describe("buildBwrapArgs()", () => {
     const runtimeDirBindIndex = args.lastIndexOf("--bind");
     assert.equal(args[runtimeDirBindIndex + 1], "/tmp/taskferry-runtime");
     assert.ok(runtimeDirBindIndex > tmpTmpfsIndex);
+  });
+
+  test("appends extraRwBinds after directory/runtimeDir and before extraRoBinds", () => {
+    const args = buildBwrapArgs({
+      directory: "/workspace/my-repo",
+      stateDir: "/home/user/.local/state/taskferry",
+      runtimeDir: "/home/user/.local/state/taskferry/run",
+      homeDir: "/home/user",
+      extraRwBinds: ["/workspace/main-repo/.git/worktrees/my-repo"],
+    });
+    const runtimeDirBindIndex = args.lastIndexOf("/home/user/.local/state/taskferry/run");
+    const extraBindIndex = args.indexOf("/workspace/main-repo/.git/worktrees/my-repo");
+    assert.notEqual(extraBindIndex, -1);
+    assert.equal(args[extraBindIndex - 1], "--bind");
+    assert.equal(args[extraBindIndex + 1], "/workspace/main-repo/.git/worktrees/my-repo");
+    assert.ok(extraBindIndex > runtimeDirBindIndex);
   });
 
   test("appends extraRoBinds after the read-write binds, so a specific file wins over a broader writable parent", () => {

@@ -29,6 +29,7 @@ test("parses dispatch and applies its argument defaults", () => {
       keySlot: undefined,
       finalMarker: undefined,
       noSandbox: false,
+      allowedDirs: undefined,
     },
     help: false,
   });

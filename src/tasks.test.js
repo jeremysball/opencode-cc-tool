@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createTaskManager, summaryAgentDeniedBash } from "./tasks.js";
+import { createTaskManager, summaryAgentDeniedBash, isOutsideDirectory } from "./tasks.js";
 
 // Builds an isolated task manager backed by a temp state dir and, unless
 // overridden, fake spawnFn/killFn so no test ever touches a real `opencode`
@@ -13,7 +13,7 @@ import { createTaskManager, summaryAgentDeniedBash } from "./tasks.js";
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, runtimeDir, platform, onEvent } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, runtimeDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -48,6 +48,8 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     ...(providerKeyEnvName != null ? { providerKeyEnvName } : {}),
     ...(summaryKeySlot != null ? { summaryKeySlot } : {}),
     ...(summaryProviderKeyEnvName != null ? { summaryProviderKeyEnvName } : {}),
+    ...(allowedDirs != null ? { allowedDirs } : {}),
+    ...(resolveGitCommonDirFn != null ? { resolveGitCommonDirFn } : {}),
   });
 }
 
@@ -273,6 +275,24 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
   });
 });
 
+describe("isOutsideDirectory()", () => {
+  test("is true for a genuinely outside sibling path", () => {
+    assert.equal(isOutsideDirectory("/workspace/repo", "/workspace/other"), true);
+  });
+
+  test("is false for a path nested inside the directory", () => {
+    assert.equal(isOutsideDirectory("/workspace/repo", "/workspace/repo/.git"), false);
+  });
+
+  test("does not misclassify a nested directory whose name happens to start with '..' as outside", () => {
+    assert.equal(isOutsideDirectory("/workspace/repo", "/workspace/repo/..foo"), false);
+  });
+
+  test("is true for the parent directory itself", () => {
+    assert.equal(isOutsideDirectory("/workspace/repo/sub", "/workspace/repo"), true);
+  });
+});
+
 describe("bwrap sandboxing", () => {
   test("wraps the spawn command in bwrap when sandboxing is enabled and available", () => {
     let captured = null;
@@ -299,6 +319,104 @@ describe("bwrap sandboxing", () => {
       "-m", "opencode-go/minimax-m3", "--variant", "max", "--", "hello",
     ]);
     assert.equal(captured.opts.cwd, os.tmpdir());
+  });
+
+  test("binds a git worktree's real gitdir read-write, since it lives outside the dispatch directory itself (issue #103's underlying blocker)", () => {
+    let captured = null;
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "axi-worktree-dir-"));
+    const gitCommonDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-git-common-dir-"));
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      resolveGitCommonDirFn: () => gitCommonDir,
+    });
+
+    mgr.dispatch({ prompt: "hello", directory });
+
+    const bindIndex = captured.args.indexOf(gitCommonDir);
+    assert.notEqual(bindIndex, -1);
+    assert.equal(captured.args[bindIndex - 1], "--bind");
+  });
+
+  test("does not add a redundant bind when the resolved git-common-dir is already inside the dispatch directory", () => {
+    let captured = null;
+    const directory = os.tmpdir();
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      resolveGitCommonDirFn: () => path.join(directory, ".git"),
+    });
+
+    mgr.dispatch({ prompt: "hello", directory });
+
+    const bindCount = captured.args.filter((arg) => arg === "--bind").length;
+    // Only directory + runtimeDir binds -- the git-common-dir sits inside
+    // `directory`, already covered by that one bind.
+    assert.equal(bindCount, 2);
+  });
+
+  test("binds the manager-level allowedDirs config default read-write", () => {
+    let captured = null;
+    const allowed = fs.mkdtempSync(path.join(os.tmpdir(), "axi-allowed-dir-"));
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      resolveGitCommonDirFn: () => null,
+      allowedDirs: [allowed],
+    });
+
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+
+    const bindIndex = captured.args.indexOf(allowed);
+    assert.notEqual(bindIndex, -1);
+    assert.equal(captured.args[bindIndex - 1], "--bind");
+  });
+
+  test("binds a per-dispatch --allowed-dirs entry read-write, in addition to the manager-level default", () => {
+    let captured = null;
+    const managerDefault = fs.mkdtempSync(path.join(os.tmpdir(), "axi-allowed-dir-"));
+    const perDispatch = fs.mkdtempSync(path.join(os.tmpdir(), "axi-allowed-dir-"));
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      resolveGitCommonDirFn: () => null,
+      allowedDirs: [managerDefault],
+    });
+
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), allowedDirs: [perDispatch] });
+
+    const managerBindIndex = captured.args.indexOf(managerDefault);
+    assert.notEqual(managerBindIndex, -1);
+    assert.equal(captured.args[managerBindIndex - 1], "--bind");
+
+    const perDispatchBindIndex = captured.args.indexOf(perDispatch);
+    assert.notEqual(perDispatchBindIndex, -1);
+    assert.equal(captured.args[perDispatchBindIndex - 1], "--bind");
+  });
+
+  test("silently skips an allowedDirs entry that doesn't exist on disk", () => {
+    let captured = null;
+    const missing = path.join(os.tmpdir(), "axi-allowed-dir-does-not-exist");
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      resolveGitCommonDirFn: () => null,
+      allowedDirs: [missing],
+    });
+
+    mgr.dispatch({ prompt: "hello", directory: os.tmpdir() });
+
+    assert.equal(captured.args.includes(missing), false);
   });
 
   test("drops deny-list paths that don't exist on disk, since bwrap's --tmpfs fails on a missing mount point", () => {

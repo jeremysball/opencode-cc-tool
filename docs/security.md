@@ -154,6 +154,30 @@ Every dispatched OpenCode child, and every summary child, runs wrapped in
 - **Deny-list is fixed** in this version — no config override. It covers
   taskferry's own state dir plus the standard credential locations; a
   config override can be added later if a real need surfaces.
+- **Git worktrees get their real gitdir bound read-write automatically.** A
+  worktree's `.git` is just a pointer file to its actual gitdir under the
+  main checkout's `.git/worktrees/<name>` — outside the worktree's own
+  directory, and therefore invisible to the read-write bind on that
+  directory alone. Every dispatch resolves `git rev-parse
+  --git-common-dir` against its working directory and, when the result
+  sits outside that directory (i.e. this is a worktree, not the main
+  checkout), binds it read-write too — otherwise `git commit`/`git add`
+  inside the sandbox fails with a read-only filesystem error. `--git-common-dir`
+  is the *shared* gitdir (objects, refs, config, hooks), not just the
+  worktree-specific `.git/worktrees/<name>` subdirectory — git commit needs
+  write access to the shared object store too, so a sandboxed dispatch into a
+  worktree gets write access to the whole main checkout's git internals, not
+  only its own worktree's slice of it. This is an inherent tradeoff of
+  enabling commits from a worktree at all, not a narrower alternative that
+  was missed.
+- **`allowedDirs`** extends this same read-write allowance to arbitrary
+  extra directories, for anything else a dispatch legitimately needs to
+  write outside its own working directory. Set it as a comma-separated
+  list of paths — as the `allowedDirs` config field (applies to every
+  dispatch the daemon serves) or via `--allowed-dirs <path,path,...>` on a
+  single `taskferry dispatch` call (adds to, not replaces, the config
+  default). Entries that don't exist on disk are silently skipped, the
+  same as the deny-list.
 - **`XDG_DATA_HOME` is redirected.** OpenCode writes its own logs, session
   database, and snapshots under `XDG_DATA_HOME` (`~/.local/share` by
   default), which is read-only inside the sandbox. Sandboxed dispatches get
