@@ -574,7 +574,7 @@ export function createTaskManager({
   // In-memory state is the source of truth for queued and running tasks while this server
   // process is alive: process exit is delivered via the 'exit' event on our
   // own child_process handle, which only exists in the process that spawned
-  // it. tasks.json is a best-effort record for taskferry_list/debugging across
+  // it. tasks.json is a best-effort record for taskferry list/debugging across
   // a server restart, not a re-attach mechanism. A restarted server has no
   // handle to a child spawned by its previous instance, so any task still
   // "running" in the file when we reload it is relabeled "unknown" rather
@@ -582,7 +582,7 @@ export function createTaskManager({
   /** @type {Map<string, Task>} */
   const tasks = new Map();
 
-  // Escalation timers for taskferry_cancel, keyed by task id. Kept out of the
+  // Escalation timers for taskferry cancel, keyed by task id. Kept out of the
   // task object itself: task objects get JSON.stringify'd wholesale in
   // persist(), and a Timeout isn't serializable data.
   /** @type {Map<string, NodeJS.Timeout>} */
@@ -602,7 +602,7 @@ export function createTaskManager({
 
   // Pending `wait` callbacks, keyed by task id. Lets a single `taskferry wait`
   // call block until the child's exit event fires (or a timeout elapses)
-  // instead of the caller round-tripping taskferry_status in a loop. Not
+  // instead of the caller round-tripping taskferry status in a loop. Not
   // persisted or shared across a server restart, same as the tasks map itself.
   /** @type {Map<string, Array<(timedOut?: boolean) => void>>} */
   const waiters = new Map();
@@ -610,7 +610,7 @@ export function createTaskManager({
   // Advisor session recency, keyed by opencode session id. Process-lifetime
   // only, same as `tasks` and `waiters` -- a taskferry restart means every
   // session id is "unknown," which resolveAdvisorSession() treats identically
-  // to "expired" rather than special-casing it. Prevents taskferry_advisor
+  // to "expired" rather than special-casing it. Prevents taskferry advisor
   // from silently resuming a conversation whose prompt cache has gone cold.
   /** @type {Map<string, number>} */
   const advisorSessions = new Map();
@@ -815,7 +815,7 @@ export function createTaskManager({
     };
   }
 
-  // Minimal per-row schema for taskferry_list: an agent scanning a task list
+  // Minimal per-row schema for taskferry list: an agent scanning a task list
   // needs id/status/model/startedAt to decide what to poll next, not the full
   // detail (directory, pid, logPath, ...) that summarize() carries for a
   // single-task lookup. failureReason is included despite that otherwise-thin
@@ -838,7 +838,7 @@ export function createTaskManager({
    * @returns {Error}
    */
   function noSuchTask(taskId) {
-    return new Error(`error: unknown task_id: ${taskId}\nhelp: run taskferry_list to see valid task ids`);
+    return new Error(`error: unknown task id: ${taskId}\nhelp: run taskferry list to see valid task ids`);
   }
 
   /**
@@ -913,7 +913,7 @@ export function createTaskManager({
   function dispatch({ prompt, directory, model, variant, sessionId, keySlot, internal = false, finalMarker = null, originSessionId, noSandbox = false, allowedDirs: dispatchAllowedDirs }) {
     ensureStateLoaded();
     if (!prompt || typeof prompt !== "string") {
-      throw new Error("error: prompt is required\nhelp: taskferry_dispatch requires a non-empty prompt string");
+      throw new Error("error: prompt is required\nhelp: taskferry dispatch requires a non-empty prompt string");
     }
     if (!directory || !path.isAbsolute(directory)) {
       throw new Error(`error: directory must be an absolute path (got ${JSON.stringify(directory)})\nhelp: pass the full path, e.g. "/workspace/my-repo"`);
@@ -990,8 +990,8 @@ export function createTaskManager({
     return {
       ...summary,
       next: task.status === "queued"
-        ? `Task is queued; run taskferry_poll or taskferry_status with task_id "${id}" to check when it starts`
-        : `Run taskferry_poll or taskferry_status with task_id "${id}" to check progress`,
+        ? `Task is queued; run taskferry wait or taskferry status with task id "${id}" to check when it starts`
+        : `Run taskferry wait or taskferry status with task id "${id}" to check progress`,
     };
   }
 
@@ -1004,11 +1004,11 @@ export function createTaskManager({
       try {
         modelsCache = { expiresAt: Date.now() + 5 * 60 * 1000, output: await listModelsFn(env) };
       } catch (err) {
-        throw new Error(`error: could not list available OpenCode models: ${errMessage(err)}\nhelp: verify that opencode is installed and authenticated, then retry taskferry_summary`, { cause: err });
+        throw new Error(`error: could not list available OpenCode models: ${errMessage(err)}\nhelp: verify that opencode is installed and authenticated, then retry taskferry summary`, { cause: err });
       }
     }
     if (!modelsCache.output.split("\n").some((line) => line.trim() === model)) {
-      throw new Error(`error: summary model is unavailable: ${model}\nhelp: set TASKFERRY_SUMMARY_MODEL to an installed model, then retry taskferry_summary`);
+      throw new Error(`error: summary model is unavailable: ${model}\nhelp: set TASKFERRY_SUMMARY_MODEL to an installed model, then retry taskferry summary`);
     }
   }
 
@@ -1019,7 +1019,7 @@ export function createTaskManager({
       await verifySummaryAgentFn(env);
       summaryAgentVerifiedUntil = Date.now() + 5 * 60 * 1000;
     } catch (err) {
-      throw new Error(`error: summary agent isolation check failed: ${errMessage(err)}\nhelp: verify that OpenCode denies the summary agent's tools before retrying taskferry_summary`, { cause: err });
+      throw new Error(`error: summary agent isolation check failed: ${errMessage(err)}\nhelp: verify that OpenCode denies the summary agent's tools before retrying taskferry summary`, { cause: err });
     }
   }
 
@@ -1224,7 +1224,7 @@ export function createTaskManager({
     const source = tasks.get(taskId);
     if (!source) throw noSuchTask(taskId);
     if (!Number.isSafeInteger(maxWords) || maxWords < 75 || maxWords > 300) {
-      throw new Error("error: max_words must be an integer from 75 through 300\nhelp: run taskferry_summary with max_words between 75 and 300");
+      throw new Error("error: max_words must be an integer from 75 through 300\nhelp: run taskferry summary with max_words between 75 and 300");
     }
     // Resolve the continuation session id and the last-summarized watermark
     // from the activity cache unless the caller (e.g. the activity path's
@@ -1276,7 +1276,7 @@ export function createTaskManager({
         sourceTaskId: taskId,
         sourceStatus,
         summary: "no model text observed yet",
-        help: `Run taskferry_tail with task_id "${taskId}" after the task emits output`,
+        help: `Run taskferry tail with task id "${taskId}" after the task emits output`,
       };
     }
     if (!snapshot.narration) {
@@ -1351,7 +1351,7 @@ export function createTaskManager({
       sourceLogBytes: snapshot.sourceLogBytes,
       summaryInputBytes: snapshot.inputBytes,
       summaryTask: { id, status: task.status, model: task.model },
-      next: `Run taskferry_poll with task_id "${id}", then taskferry_result with task_id "${id}"`,
+      next: `Run taskferry wait with task id "${id}", then taskferry result with task id "${id}"`,
     };
   }
 
@@ -1633,7 +1633,7 @@ export function createTaskManager({
       return { ...summarize(task), note: `task is already ${task.status}; nothing to cancel` };
     }
     if (task.pid == null) {
-      throw new Error(`error: task ${taskId} has no pid on record; cannot signal it\nhelp: run taskferry_status to inspect its recorded state`);
+      throw new Error(`error: task ${taskId} has no pid on record; cannot signal it\nhelp: run taskferry status to inspect its recorded state`);
     }
 
     task.cancelRequested = true;
@@ -1869,9 +1869,9 @@ export function createTaskManager({
   // Distinguishes "opencode never wrote a byte" (still starting up, or stuck
   // before its first event -- e.g. hung on a usage-limit retry) from "wrote
   // bytes but no parseable event yet" from "at least one event landed". A
-  // caller polling taskferry_status on a task that's been "running" for a
+  // caller polling taskferry status on a task that's been "running" for a
   // long time can use this to tell a genuinely stuck process apart from one
-  // that's just slow, without waiting out a full taskferry_poll timeout.
+  // that's just slow, without waiting out a full taskferry wait timeout.
   const LOG_ACTIVITY_SCAN_BYTES = 64 * 1024;
   /**
    * @param {string} logPath
@@ -1977,7 +1977,7 @@ export function createTaskManager({
   async function advisor({ prompt, directory, model, variant, sessionId, timeoutMs } = {}) {
     ensureStateLoaded();
     if (!model || typeof model !== "string") {
-      throw new Error("error: model is required\nhelp: taskferry_advisor requires a provider/model string, e.g. \"openai/gpt-5.6-sol\"");
+      throw new Error("error: model is required\nhelp: taskferry advisor requires a provider/model string, e.g. \"openai/gpt-5.6-sol\"");
     }
     const resolved = resolveAdvisorSession(sessionId);
     /** @type {TaskSummary & {next: string}} */
@@ -1985,7 +1985,7 @@ export function createTaskManager({
     try {
       dispatched = dispatch({ prompt: /** @type {string} */ (prompt), directory: /** @type {string} */ (directory), model, variant, sessionId: resolved.sessionId });
     } catch (err) {
-      throw new Error(errMessage(err).replaceAll("taskferry_dispatch", "taskferry_advisor"), { cause: err });
+      throw new Error(errMessage(err).replaceAll("taskferry dispatch", "taskferry advisor"), { cause: err });
     }
     const settled = await poll(dispatched.id, { timeoutMs: timeoutMs ?? maxWait });
 
@@ -2001,8 +2001,8 @@ export function createTaskManager({
         session_reset: resolved.reset,
         ...resetFields,
         note: logSessionId
-          ? `still running; call taskferry_poll or taskferry_advisor again with session_id "${logSessionId}" to continue`
-          : `still running; call taskferry_poll with task_id "${dispatched.id}" to continue (no session_id yet)`,
+          ? `still running; call taskferry wait or taskferry advisor again with session_id "${logSessionId}" to continue`
+          : `still running; call taskferry wait with task id "${dispatched.id}" to continue (no session_id yet)`,
       };
     }
 
@@ -2165,7 +2165,7 @@ export function createTaskManager({
     const task = tasks.get(taskId);
     if (!task) throw noSuchTask(taskId);
     if (!Number.isSafeInteger(chars) || chars <= 0 || chars > 65536) {
-      throw new Error("error: chars must be a positive integer no greater than 65536\nhelp: run taskferry_tail with chars between 1 and 65536");
+      throw new Error("error: chars must be a positive integer no greater than 65536\nhelp: run taskferry tail with chars between 1 and 65536");
     }
     const text = readLastText(task.logPath);
     if (!text) {
@@ -2175,7 +2175,7 @@ export function createTaskManager({
         text: "none observed yet",
         textTotalChars: 0,
         truncated: false,
-        help: `Run taskferry_poll with task_id "${taskId}" to wait for task output`,
+        help: `Run taskferry wait with task id "${taskId}" to wait for task output`,
       };
     }
     const codePoints = Array.from(text);
@@ -2296,7 +2296,7 @@ export function createTaskManager({
       }
     }
     if (task.status === "running" || task.status === "queued") {
-      return projectResult({ taskId, status: task.status, message: `task is still ${task.status}; poll taskferry_status first` }, fields);
+      return projectResult({ taskId, status: task.status, message: `task is still ${task.status}; poll taskferry status first` }, fields);
     }
     if (task.status === "unknown" && task.summaryOf) {
       return projectResult({
@@ -2387,7 +2387,7 @@ export function createTaskManager({
       ...(task.incomplete === true
         ? { next: `Task ${taskId} exited cleanly but produced no usable final output${task.finalMarker ? ` (--require-final-marker ${JSON.stringify(task.finalMarker)} did not match)` : " (empty message)"}; treat as incomplete` }
         : truncated
-          ? { next: `Run taskferry_result with full: true on task_id "${taskId}" to see the complete narration` }
+          ? { next: `Run taskferry result with full: true on task id "${taskId}" to see the complete narration` }
           : {}),
       logPath: task.logPath,
     }, fields);

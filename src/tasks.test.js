@@ -217,7 +217,7 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
     const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
     assert.equal(dispatched.status, "running");
     assert.equal(dispatched.pid, 555);
-    assert.match(dispatched.next, /taskferry_poll or taskferry_status/);
+    assert.match(dispatched.next, /taskferry wait or taskferry status/);
 
     child.emit("exit", 0, null);
 
@@ -2239,28 +2239,28 @@ describe("cancel()", () => {
   });
 });
 
-describe("unknown task_id (status/cancel/wait/result share one error path)", () => {
+describe("unknown task id (status/cancel/wait/result share one error path)", () => {
   test("status() throws with an actionable help line", () => {
     const mgr = makeManager();
     assert.throws(
       () => mgr.status("nope"),
-      /error: unknown task_id: nope\nhelp: run taskferry_list to see valid task ids/
+      /error: unknown task id: nope\nhelp: run taskferry list to see valid task ids/
     );
   });
 
   test("cancel() throws the same formatted error", () => {
     const mgr = makeManager();
-    assert.throws(() => mgr.cancel("nope"), /error: unknown task_id: nope/);
+    assert.throws(() => mgr.cancel("nope"), /error: unknown task id: nope/);
   });
 
   test("result() throws the same formatted error", () => {
     const mgr = makeManager();
-    assert.throws(() => mgr.result("nope"), /error: unknown task_id: nope/);
+    assert.throws(() => mgr.result("nope"), /error: unknown task id: nope/);
   });
 
   test("poll() throws synchronously (not a rejected promise) for an unknown id", () => {
     const mgr = makeManager();
-    assert.throws(() => mgr.poll("nope"), /error: unknown task_id: nope/);
+    assert.throws(() => mgr.poll("nope"), /error: unknown task id: nope/);
   });
 });
 
@@ -2506,10 +2506,10 @@ describe("advisor()", () => {
     assert.equal(advised.status, "running");
     assert.equal(advised.task_id, dispatched.id);
     assert.equal(advised.session_id, "ses_midrun");
-    assert.match(advised.note, /taskferry_poll or taskferry_advisor again with session_id/);
+    assert.match(advised.note, /taskferry wait or taskferry advisor again with session_id/);
   });
 
-  test("when the timeout elapses before opencode has written a session id, the note points at taskferry_poll with task_id instead of fabricating a session_id", async () => {
+  test("when the timeout elapses before opencode has written a session id, the note points at taskferry wait with task id instead of fabricating a session_id", async () => {
     const child = fakeChild();
     const mgr = makeManager({ spawnFn: () => child });
 
@@ -2524,17 +2524,17 @@ describe("advisor()", () => {
     const advised = await advisorPromise;
     assert.equal(advised.status, "running");
     assert.equal(advised.session_id, null);
-    assert.match(advised.note, /taskferry_poll with task_id/);
+    assert.match(advised.note, /taskferry wait with task id/);
     assert.equal(advised.note.includes('session_id ""'), false);
   });
 
-  test("a dispatch validation error is reported under taskferry_advisor, not taskferry_dispatch", async () => {
+  test("a dispatch validation error is reported under taskferry advisor, not taskferry dispatch", async () => {
     const mgr = makeManager();
     await assert.rejects(
       () => mgr.advisor({ prompt: "", directory: os.tmpdir(), model: "openai/gpt-5.6-sol" }),
       (err) => {
-        assert.match(err.message, /taskferry_advisor requires a non-empty prompt string/);
-        assert.equal(err.message.includes("taskferry_dispatch"), false);
+        assert.match(err.message, /taskferry advisor requires a non-empty prompt string/);
+        assert.equal(err.message.includes("taskferry dispatch"), false);
         return true;
       }
     );
@@ -2660,7 +2660,7 @@ describe("advisor()", () => {
     assert.equal(advised.status, "running");
     assert.equal(advised.task_id, dispatched.id);
     assert.equal(advised.session_id, "ses_midrun");
-    assert.match(advised.note, /taskferry_poll or taskferry_advisor again with session_id/);
+    assert.match(advised.note, /taskferry wait or taskferry advisor again with session_id/);
   });
 });
 
