@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { withFileLock } from "./state-lock.js";
 import { PROTOCOL_VERSION, encodeMessage } from "./protocol.js";
 import { loadConfig } from "./config.js";
+import { isObject } from "./numbers.js";
 import { resolveRuntimeDir, resolveStateDir } from "./paths.js";
 
 const DAEMON_ENTRY = fileURLToPath(new URL("./daemon.js", import.meta.url));
@@ -211,10 +212,6 @@ class DaemonClient {
     this.failAll(new Error("taskferry daemon connection closed by client"));
     this.socket.destroy();
   }
-}
-
-function isObject(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function isExactObject(value, keys) {
