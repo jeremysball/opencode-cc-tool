@@ -1962,6 +1962,17 @@ export function createTaskManager({
 
   /**
    * @param {string} taskId
+   * @returns {string}
+   */
+  function taskDirectory(taskId) {
+    ensureStateLoaded();
+    const task = tasks.get(taskId);
+    if (!task) throw noSuchTask(taskId);
+    return task.directory;
+  }
+
+  /**
+   * @param {string} taskId
    * @param {{timeoutMs?: number, tailChars?: number}} [options]
    * @returns {Promise<TaskStatus>}
    */
@@ -2433,6 +2444,7 @@ export function createTaskManager({
     dispatch,
     cancel,
     status,
+    taskDirectory,
     poll,
     list,
     result,

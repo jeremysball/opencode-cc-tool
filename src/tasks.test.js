@@ -2292,6 +2292,20 @@ describe("unknown task id (status/cancel/wait/result share one error path)", () 
   });
 });
 
+describe("taskDirectory() (issue #59: lets event.subscribe resolve a directory server-side from a taskId)", () => {
+  test("returns the task's directory", () => {
+    const mgr = makeManager({
+      tasksFixture: () => [baseTask({ id: "t1", status: "done", directory: os.tmpdir() })],
+    });
+    assert.equal(mgr.taskDirectory("t1"), os.tmpdir());
+  });
+
+  test("throws the standard unknown-task error for a taskId that doesn't exist", () => {
+    const mgr = makeManager({ tasksFixture: () => [] });
+    assert.throws(() => mgr.taskDirectory("nope"), /unknown task id/);
+  });
+});
+
 describe("status() log activity (tells a stuck-before-first-event task apart from an active one)", () => {
   test("reports zero bytes and no event when the log file doesn't exist yet (e.g. still queued)", () => {
     const mgr = makeManager({

@@ -351,10 +351,13 @@ export async function startDaemon({
               if (request.params.summaries === true && typeof manager.checkSummaryModelReady === "function") {
                 await manager.checkSummaryModelReady();
               }
+              const directory = request.params.directory !== undefined
+                ? normalizeDirectory(request.params.directory)
+                : normalizeDirectory(manager.taskDirectory(request.params.taskId));
               const subscriptionId = randomUUID();
               subscriptions.set(subscriptionId, {
                 socket,
-                directory: normalizeDirectory(request.params.directory),
+                directory,
                 summaries: request.params.summaries === true,
                 originSessionId: request.params.originSessionId || null,
               });
