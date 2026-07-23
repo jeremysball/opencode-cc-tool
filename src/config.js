@@ -19,6 +19,7 @@ const CONFIG_FIELD_TYPES = {
   summaryKeySlot: "string",
   summaryProviderKeyEnv: "string",
   sandboxEnabled: "boolean",
+  allowedDirs: "string",
 };
 
 /**

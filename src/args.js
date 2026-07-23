@@ -13,12 +13,14 @@ const commandSpecs = {
       "--key-slot <name>": "use a configured provider key slot",
       "--require-final-marker <regex>": "flag the task as incomplete if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics)",
       "--no-sandbox": "run this dispatch without the bwrap filesystem sandbox (default: sandboxed on Linux)",
+      "--allowed-dirs <path,path,...>": "extra directories bound read-write inside the sandbox, in addition to the auto-detected git-common-dir for a worktree",
     },
     examples: [
       'taskferry dispatch --prompt "Fix the failing tests"',
       'taskferry dispatch --prompt "Review this change" --model openai/gpt-5.6-sol',
       'taskferry dispatch --prompt "Investigate" --require-final-marker "^Status: (DONE|DONE_WITH_CONCERNS|BLOCKED)$"',
       'taskferry dispatch --prompt "Run one-off shell tooling" --no-sandbox',
+      'taskferry dispatch --prompt "Update the shared cache dir" --allowed-dirs /home/user/.cache/myapp',
     ],
   },
   cancel: {
@@ -229,7 +231,7 @@ function parseFields(value) {
 function defaultOptions(command, cwd) {
   switch (command) {
     case "dispatch":
-      return { prompt: undefined, directory: cwd, model: undefined, variant: undefined, sessionId: undefined, keySlot: undefined, finalMarker: undefined, noSandbox: false };
+      return { prompt: undefined, directory: cwd, model: undefined, variant: undefined, sessionId: undefined, keySlot: undefined, finalMarker: undefined, noSandbox: false, allowedDirs: undefined };
     case "advisor":
       return { prompt: undefined, model: undefined, directory: cwd, variant: undefined, sessionId: undefined, timeoutMs: undefined };
     case "cancel":
@@ -345,6 +347,7 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       "--format": "format",
       "--task-id": "taskId",
       "--require-final-marker": "finalMarker",
+      "--allowed-dirs": "allowedDirs",
     };
     const key = values[name];
     if (!key || !commandAllows(command, name)) throw usageError(`unknown flag ${name} for \`${command}\``, command);
@@ -355,6 +358,9 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       value = parseNumber(value, name, key === "tailChars" || key === "chars" ? { min: 1, max: 65536 } : key === "maxWords" ? { min: 75, max: 300 } : { min: key === "limit" ? 1 : 0 });
     } else if (key === "fields") {
       value = parseFields(value);
+    } else if (key === "allowedDirs") {
+      value = value.split(",").map((entry) => entry.trim()).filter(Boolean);
+      if (!value.length) throw new UsageError("--allowed-dirs must contain at least one path", "Use --allowed-dirs with one or more comma-separated paths");
     } else if (key === "format") {
       const allowed = command === "watch" ? ["toon", "ndjson"] : ["toon", "claude-hook", "codex-hook"];
       if (!allowed.includes(value)) throw new UsageError(`${name} must be one of ${allowed.join(", ")}`, `Use ${name} with one of: ${allowed.join(", ")}`);
@@ -395,7 +401,7 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
 
 function commandAllows(command, flag) {
   const flags = {
-    dispatch: ["--prompt", "--directory", "--model", "--variant", "--session-id", "--key-slot", "--require-final-marker"],
+    dispatch: ["--prompt", "--directory", "--model", "--variant", "--session-id", "--key-slot", "--require-final-marker", "--allowed-dirs"],
     cancel: ["--grace-ms"],
     wait: ["--timeout-ms", "--tail-chars"],
     advisor: ["--prompt", "--model", "--directory", "--variant", "--session-id", "--timeout-ms"],

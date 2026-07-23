@@ -95,4 +95,16 @@ describe("loadConfig()", () => {
     const configPath = writeConfig(dir, JSON.stringify({ sandboxEnabled: "false" }));
     assert.throws(() => loadConfig({ configPath }), /error: config key "sandboxEnabled".*must be a boolean.*\nhelp:/s);
   });
+
+  test("accepts a valid allowedDirs value", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ allowedDirs: "/home/user/.cache/myapp,/opt/shared" }));
+    assert.deepEqual(loadConfig({ configPath }), { allowedDirs: "/home/user/.cache/myapp,/opt/shared" });
+  });
+
+  test("rejects a wrong-typed allowedDirs value", () => {
+    const dir = tmpConfigDir();
+    const configPath = writeConfig(dir, JSON.stringify({ allowedDirs: ["/opt/shared"] }));
+    assert.throws(() => loadConfig({ configPath }), /error: config key "allowedDirs".*must be a string.*\nhelp:/s);
+  });
 });
