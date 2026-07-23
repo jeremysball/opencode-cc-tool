@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createTaskManager, summaryAgentDeniedBash } from "./tasks.js";
+import { createTaskManager, summaryAgentDeniedBash, isOutsideDirectory } from "./tasks.js";
 
 // Builds an isolated task manager backed by a temp state dir and, unless
 // overridden, fake spawnFn/killFn so no test ever touches a real `opencode`
@@ -275,6 +275,24 @@ describe("dispatch() lifecycle, driven through an injected spawnFn (no real open
   });
 });
 
+describe("isOutsideDirectory()", () => {
+  test("is true for a genuinely outside sibling path", () => {
+    assert.equal(isOutsideDirectory("/workspace/repo", "/workspace/other"), true);
+  });
+
+  test("is false for a path nested inside the directory", () => {
+    assert.equal(isOutsideDirectory("/workspace/repo", "/workspace/repo/.git"), false);
+  });
+
+  test("does not misclassify a nested directory whose name happens to start with '..' as outside", () => {
+    assert.equal(isOutsideDirectory("/workspace/repo", "/workspace/repo/..foo"), false);
+  });
+
+  test("is true for the parent directory itself", () => {
+    assert.equal(isOutsideDirectory("/workspace/repo/sub", "/workspace/repo"), true);
+  });
+});
+
 describe("bwrap sandboxing", () => {
   test("wraps the spawn command in bwrap when sandboxing is enabled and available", () => {
     let captured = null;
@@ -362,6 +380,7 @@ describe("bwrap sandboxing", () => {
 
   test("binds a per-dispatch --allowed-dirs entry read-write, in addition to the manager-level default", () => {
     let captured = null;
+    const managerDefault = fs.mkdtempSync(path.join(os.tmpdir(), "axi-allowed-dir-"));
     const perDispatch = fs.mkdtempSync(path.join(os.tmpdir(), "axi-allowed-dir-"));
     const mgr = makeManager({
       spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
@@ -369,13 +388,18 @@ describe("bwrap sandboxing", () => {
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       platform: "linux",
       resolveGitCommonDirFn: () => null,
+      allowedDirs: [managerDefault],
     });
 
     mgr.dispatch({ prompt: "hello", directory: os.tmpdir(), allowedDirs: [perDispatch] });
 
-    const bindIndex = captured.args.indexOf(perDispatch);
-    assert.notEqual(bindIndex, -1);
-    assert.equal(captured.args[bindIndex - 1], "--bind");
+    const managerBindIndex = captured.args.indexOf(managerDefault);
+    assert.notEqual(managerBindIndex, -1);
+    assert.equal(captured.args[managerBindIndex - 1], "--bind");
+
+    const perDispatchBindIndex = captured.args.indexOf(perDispatch);
+    assert.notEqual(perDispatchBindIndex, -1);
+    assert.equal(captured.args[perDispatchBindIndex - 1], "--bind");
   });
 
   test("silently skips an allowedDirs entry that doesn't exist on disk", () => {

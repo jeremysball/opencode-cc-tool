@@ -162,7 +162,14 @@ Every dispatched OpenCode child, and every summary child, runs wrapped in
   --git-common-dir` against its working directory and, when the result
   sits outside that directory (i.e. this is a worktree, not the main
   checkout), binds it read-write too — otherwise `git commit`/`git add`
-  inside the sandbox fails with a read-only filesystem error.
+  inside the sandbox fails with a read-only filesystem error. `--git-common-dir`
+  is the *shared* gitdir (objects, refs, config, hooks), not just the
+  worktree-specific `.git/worktrees/<name>` subdirectory — git commit needs
+  write access to the shared object store too, so a sandboxed dispatch into a
+  worktree gets write access to the whole main checkout's git internals, not
+  only its own worktree's slice of it. This is an inherent tradeoff of
+  enabling commits from a worktree at all, not a narrower alternative that
+  was missed.
 - **`allowedDirs`** extends this same read-write allowance to arbitrary
   extra directories, for anything else a dispatch legitimately needs to
   write outside its own working directory. Set it as a comma-separated

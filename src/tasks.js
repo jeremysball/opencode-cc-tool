@@ -333,6 +333,16 @@ export function parseAllowedDirs(spec) {
     .filter(Boolean);
 }
 
+/**
+ * @param {string} directory
+ * @param {string} candidate
+ * @returns {boolean}
+ */
+export function isOutsideDirectory(directory, candidate) {
+  const rel = path.relative(directory, candidate);
+  return rel === ".." || rel.startsWith(".." + path.sep) || path.isAbsolute(rel);
+}
+
 const DEFAULT_MAX_DISPATCHES_PER_WINDOW = 2;
 const DEFAULT_DISPATCH_WINDOW_MS = 5000;
 const DEFAULT_MAX_CONCURRENT_TASKS = 4;
@@ -1474,7 +1484,7 @@ export function createTaskManager({
         /** @type {string[]} */
         const extraRwBinds = [];
         const gitCommonDir = resolveGitCommonDirFn(launchDirectory);
-        if (gitCommonDir && existsFn(gitCommonDir) && path.relative(launchDirectory, gitCommonDir).startsWith("..")) {
+        if (gitCommonDir && existsFn(gitCommonDir) && isOutsideDirectory(launchDirectory, gitCommonDir)) {
           extraRwBinds.push(gitCommonDir);
         }
         for (const dir of [...allowedDirs, ...(isSummary ? [] : dispatchLaunch.allowedDirs || [])]) {
