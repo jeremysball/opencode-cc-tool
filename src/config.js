@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseKeySlots } from "./tasks.js";
+import { KNOWN_EXECUTORS } from "./executor.js";
 
 const CONFIG_FIELD_TYPES = {
   maxConcurrentTasks: "number",
@@ -21,6 +22,9 @@ const CONFIG_FIELD_TYPES = {
   summaryProviderKeyEnv: "string",
   sandboxEnabled: "boolean",
   allowedDirs: "string",
+  waitDefaultTimeoutMs: "number",
+  cancelGraceMs: "number",
+  defaultExecutor: "string",
 };
 
 /**
@@ -73,6 +77,10 @@ export function loadConfig({ env = process.env, configPath = resolveConfigPath(e
   }
 
   if (parsed.keySlots !== undefined) parseKeySlots(parsed.keySlots);
+
+  if (parsed.defaultExecutor !== undefined && !KNOWN_EXECUTORS.includes(parsed.defaultExecutor)) {
+    throw new Error(`error: config key "defaultExecutor" in ${configPath} must be one of ${KNOWN_EXECUTORS.join(", ")} (got ${JSON.stringify(parsed.defaultExecutor)})\nhelp: fix the value in ${configPath}`);
+  }
 
   return parsed;
 }

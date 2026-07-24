@@ -15,6 +15,7 @@ import { checkClaudeCodePlaywrightIsolation, checkOpencodePlaywrightIsolation } 
 import { checkBwrapAvailableAsync } from "./sandbox.js";
 import { checkSkills as defaultCheckSkills } from "../scripts/generate-skill.js";
 import { normalizeDirectory } from "./paths.js";
+import { loadConfig } from "./config.js";
 
 // Default timeout for the CLI `wait` command (and `summary --wait`) when no
 // explicit --timeout-ms is given. Kept generous (15 min) so real tasks aren't
@@ -24,15 +25,18 @@ import { normalizeDirectory } from "./paths.js";
 const DEFAULT_WAIT_TIMEOUT_MS = 900000;
 
 /**
- * Resolve the effective default wait timeout: explicit env var override, or the
- * built-in default. Returns `null` when the env var is set to "0" (opt-out).
+ * Resolve the effective default wait timeout: explicit env var override, then
+ * the config file's `waitDefaultTimeoutMs`, then the built-in default. Returns
+ * `null` when the env var is set to "0" (opt-out).
  * @param {NodeJS.ProcessEnv} env
  * @returns {number|null}
  */
 function resolveWaitDefaultTimeoutMs(env) {
   if (env.TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS === "0") return null;
   const envMs = Number(env.TASKFERRY_WAIT_DEFAULT_TIMEOUT_MS);
-  return Number.isFinite(envMs) && envMs > 0 ? envMs : DEFAULT_WAIT_TIMEOUT_MS;
+  if (Number.isFinite(envMs) && envMs > 0) return envMs;
+  const configMs = Number(loadConfig({ env }).waitDefaultTimeoutMs);
+  return Number.isFinite(configMs) && configMs > 0 ? configMs : DEFAULT_WAIT_TIMEOUT_MS;
 }
 
 // Checked from `doctor` so a missing Claude plugin install surfaces in the
