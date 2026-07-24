@@ -31,7 +31,7 @@ const SUMMARY_ISOLATION_PROMPT =
 
 /**
  * @typedef {Object} WorkerExecutor
- * @property {string} id
+ * @property {"opencode"|"pi"} id
  * @property {string} taskIdPrefix
  * @property {string} errorBucketPrefix
  * @property {string} defaultModel
@@ -128,7 +128,7 @@ function piNormalizeLogEvent(parsed) {
   }
 }
 
-/** @param {{execFileFn?: typeof execFileAsync}} [options] */
+/** @param {{execFileFn?: typeof execFileAsync}} [options] @returns {import("./executor.js").WorkerExecutor} */
 export function piExecutor({ execFileFn = execFileAsync } = {}) {
   return {
     id: "pi",

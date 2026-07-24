@@ -51,7 +51,7 @@ import { resolveExecutor, opencodeExecutor } from "./executor.js";
  * @property {SummaryOf} [summaryOf]
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
- * @property {string} [executorId]
+ * @property {"opencode"|"pi"} [executorId]
  */
 
 /**
@@ -78,7 +78,7 @@ import { resolveExecutor, opencodeExecutor } from "./executor.js";
  * @property {string|null} [spawnError]
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
- * @property {string} [executorId]
+ * @property {"opencode"|"pi"} [executorId]
  */
 
 /**
