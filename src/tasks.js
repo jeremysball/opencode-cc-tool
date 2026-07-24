@@ -194,6 +194,10 @@ const AUTHENTICATION_FAILED_PATTERNS = [
   /invalid.api.?key/i,
   /authentication.?failed/i,
   /status(_code)?[:\s=]+401\b/i,
+  // pi's own plain-English auth failure text ("No API key found for
+  // <provider>.") matches none of the patterns above -- verified live
+  // against a real unauthenticated pi dispatch (issue #94 research).
+  /no api key/i,
 ];
 // rate_limited: the broadest, most generic bucket, checked last. Bare
 // `quota` (without `insufficient_quota` or another payment_required
@@ -230,9 +234,10 @@ function capDetail(text) {
 // false-positive surface (GLM-5.2 review of 0d944df..4e75129, finding 1).
 /**
  * @param {string[]} lines
+ * @param {string} errorBucketPrefix
  * @returns {{failure: {bucket: string, detail: string} | null, hasParseableLine: boolean}}
  */
-function classifyProviderFailure(lines) {
+function classifyProviderFailure(lines, errorBucketPrefix) {
   let hasParseableLine = false;
   for (const line of lines) {
     if (!line.trim()) continue;
@@ -263,7 +268,7 @@ function classifyProviderFailure(lines) {
     const errorMessage = typeof evt.error?.data?.message === "string" ? evt.error.data.message : text;
     return {
       failure: {
-        bucket: `opencode_${errorName.replace(/[^a-zA-Z0-9]+/g, "_").toLowerCase()}`,
+        bucket: `${errorBucketPrefix}_${errorName.replace(/[^a-zA-Z0-9]+/g, "_").toLowerCase()}`,
         detail: capDetail(errorMessage),
       },
       hasParseableLine,
@@ -1772,7 +1777,7 @@ export function createTaskManager({
       text += buf.toString("utf8");
     }
     if (!text) return; // nothing to classify
-    const { failure } = classifyProviderFailure(text.split("\n"));
+    const { failure } = classifyProviderFailure(text.split("\n"), "opencode"); // Task 7 makes this task-aware
     if (failure) {
       task.failureReason = failure.bucket;
       task.failureDetail = failure.detail;
@@ -1829,9 +1834,9 @@ export function createTaskManager({
           const text = carry + buf.toString("utf8");
           const lines = text.split("\n");
           carry = lines.pop() ?? "";
-          const linesResult = classifyProviderFailure(lines);
+          const linesResult = classifyProviderFailure(lines, "opencode"); // Task 7 makes this task-aware
           const carryResult = !linesResult.failure && carry && !carry.trimStart().startsWith("{")
-            ? classifyProviderFailure([carry])
+            ? classifyProviderFailure([carry], "opencode") // Task 7 makes this task-aware
             : null;
           const providerFailure = linesResult.failure ?? carryResult?.failure ?? null;
           if (providerFailure) {

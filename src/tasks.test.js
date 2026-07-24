@@ -1833,6 +1833,35 @@ describe("provider-failure classification", () => {
     assert.equal(mgr.status(dispatched.id).failureReason, null);
   });
 
+  test("pi's plain-text 'No API key found for openai.' stderr line lands on authentication_failed (issue #94)", async () => {
+    // pi's auth-failure stderr text reads "No API key found for <provider>."
+    // -- plain English, not the `unauthorized`/`invalid api key`/`status 401`
+    // surface the existing regex set covers. Without an additional pattern,
+    // it leaks through as the unclassified `crashed` fallback. Today the
+    // dispatch is opencode-backed (Task 6/7 will let a pi dispatch route
+    // its raw line through the same classifier with `pi_` prefix); the
+    // executor-prefixed end-to-end check lives with that task.
+    const child = fakeChild(7115);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 60000,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      "No API key found for openai.\n"
+    );
+
+    await new Promise((r) => setTimeout(r, 40));
+    child.emit("exit", null, "SIGTERM");
+    const s = mgr.status(dispatched.id, { full: true });
+    assert.equal(s.failureReason, "authentication_failed");
+    assert.equal(s.failureDetail, "No API key found for openai.");
+  });
+
   test("a structured status_code: 401 diagnostic without the word 'unauthorized' still lands on authentication_failed", async () => {
     const child = fakeChild(7111);
     const killed = [];
