@@ -154,7 +154,7 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
       const modelName = slash === -1 ? ctx.model : ctx.model.slice(slash + 1);
       const args = provider ? ["--provider", provider, "--model", modelName] : ["--model", modelName];
       args.push("--mode", "json");
-      if (ctx.sessionId) args.push("--session", ctx.sessionId);
+      if (ctx.sessionId) args.push("--continue", "--session", ctx.sessionId);
       if (ctx.isSummary) args.push("-p", this.buildSummaryPrompt(), `@${ctx.snapshotPath}`);
       else if (ctx.promptFilePath) args.push("-p", "Follow the instructions in the attached prompt file exactly.", `@${ctx.promptFilePath}`);
       else args.push("-p", ctx.prompt);
