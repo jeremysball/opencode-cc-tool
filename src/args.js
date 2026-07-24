@@ -1,5 +1,6 @@
 import { RESULT_FIELDS } from "./protocol.js";
 import { UsageError } from "./errors.js";
+import { KNOWN_EXECUTORS } from "./executor.js";
 
 const commandSpecs = {
   dispatch: {
@@ -15,6 +16,7 @@ const commandSpecs = {
       "--require-final-marker <regex>": "flag the task as incomplete if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics)",
       "--no-sandbox": "run this dispatch without the bwrap filesystem sandbox (default: sandboxed on Linux)",
       "--allowed-dirs <path,path,...>": "extra directories bound read-write inside the sandbox, in addition to the auto-detected git-common-dir for a worktree",
+      "--executor <opencode|pi>": "worker backend to dispatch through, default opencode",
     },
     examples: [
       'taskferry dispatch --prompt "Fix the failing tests"',
@@ -51,6 +53,7 @@ const commandSpecs = {
       "--variant <name>": "optional model reasoning variant",
       "--session-id <id>": "continue a recent advisor session",
       "--timeout-ms <number>": "maximum wait in milliseconds",
+      "--executor <opencode|pi>": "worker backend to dispatch through, default opencode",
     },
     examples: [
       'taskferry advisor --prompt "How should I split this module?" --model openai/gpt-5.6-sol',
@@ -225,9 +228,9 @@ function parseFields(value) {
 function defaultOptions(command, cwd) {
   switch (command) {
     case "dispatch":
-      return { prompt: undefined, directory: cwd, model: undefined, variant: undefined, sessionId: undefined, keySlot: undefined, finalMarker: undefined, noSandbox: false, allowedDirs: undefined };
+      return { prompt: undefined, directory: cwd, model: undefined, variant: undefined, sessionId: undefined, keySlot: undefined, finalMarker: undefined, noSandbox: false, allowedDirs: undefined, executor: undefined };
     case "advisor":
-      return { prompt: undefined, model: undefined, directory: cwd, variant: undefined, sessionId: undefined, timeoutMs: undefined };
+      return { prompt: undefined, model: undefined, directory: cwd, variant: undefined, sessionId: undefined, timeoutMs: undefined, executor: undefined };
     case "cancel":
       return { taskId: undefined, graceMs: undefined };
     case "wait":
@@ -342,6 +345,7 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       "--task-id": "taskId",
       "--require-final-marker": "finalMarker",
       "--allowed-dirs": "allowedDirs",
+      "--executor": "executor",
     };
     const key = values[name];
     if (!key || !commandAllows(command, name)) throw usageError(`unknown flag ${name} for \`${command}\``, command);
@@ -360,6 +364,8 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
       if (!allowed.includes(value)) throw new UsageError(`${name} must be one of ${allowed.join(", ")}`, `Use ${name} with one of: ${allowed.join(", ")}`);
     } else if (key === "mode" && !["report", "activity"].includes(value)) {
       throw new UsageError(`${name} must be one of report, activity`, "Use --mode report or --mode activity");
+    } else if (key === "executor" && !KNOWN_EXECUTORS.includes(value)) {
+      throw new UsageError(`${name} must be one of ${KNOWN_EXECUTORS.join(", ")}`, `Use --executor ${KNOWN_EXECUTORS.join(" or --executor ")}`);
     } else if (key === "finalMarker") {
       try {
         new RegExp(value);
@@ -395,10 +401,10 @@ export function parseArgs(argv, { cwd = process.cwd() } = {}) {
 
 function commandAllows(command, flag) {
   const flags = {
-    dispatch: ["--prompt", "--directory", "--model", "--variant", "--session-id", "--key-slot", "--require-final-marker", "--allowed-dirs"],
+    dispatch: ["--prompt", "--directory", "--model", "--variant", "--session-id", "--key-slot", "--require-final-marker", "--allowed-dirs", "--executor"],
     cancel: ["--grace-ms"],
     wait: ["--timeout-ms", "--tail-chars"],
-    advisor: ["--prompt", "--model", "--directory", "--variant", "--session-id", "--timeout-ms"],
+    advisor: ["--prompt", "--model", "--directory", "--variant", "--session-id", "--timeout-ms", "--executor"],
     status: [],
     tail: ["--chars"],
     summary: ["--mode", "--max-words"],

@@ -80,6 +80,7 @@ export async function runCommand(command, options, { client, io = process, signa
         ...(options.finalMarker === undefined ? {} : { finalMarker: options.finalMarker }),
         ...(options.noSandbox === undefined ? {} : { noSandbox: options.noSandbox }),
         ...(options.allowedDirs === undefined ? {} : { allowedDirs: options.allowedDirs }),
+        ...(options.executor === undefined ? {} : { executor: options.executor }),
         ...(process.env.CLAUDE_CODE_SESSION_ID ? { originSessionId: process.env.CLAUDE_CODE_SESSION_ID } : {}),
       });
     }
@@ -129,6 +130,7 @@ export async function runCommand(command, options, { client, io = process, signa
         ...(options.variant === undefined ? {} : { variant: options.variant }),
         ...(options.sessionId === undefined ? {} : { sessionId: options.sessionId }),
         ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+        ...(options.executor === undefined ? {} : { executor: options.executor }),
       });
     }
     case "status": {

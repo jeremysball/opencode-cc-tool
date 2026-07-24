@@ -41,8 +41,9 @@ workspace"` and `next` suggests `dispatch` instead.
 
 ## `taskferry dispatch --prompt <text> [options]`
 
-Queues `opencode run --dir <directory> --auto --format json -- <prompt>` as
-a background child process and returns a task summary immediately.
+Queues `opencode run --dir <directory> --auto --format json -- <prompt>` (or
+the equivalent `pi` invocation when `--executor pi` is given) as a
+background child process and returns a task summary immediately.
 
 | Flag | Notes |
 |---|---|
@@ -50,6 +51,7 @@ a background child process and returns a task summary immediately.
 | `--directory <path>` | Defaults to the current workspace; must be an absolute, existing directory |
 | `--model <id>` | `provider/model`, e.g. `opencode-go/minimax-m3`. Run `opencode models` to list installed models. Defaults to `openai/gpt-5.6-luna` at variant `high` |
 | `--variant <name>` | Reasoning-effort override (`high`, `max`, `minimal`, ...), applied only alongside `--model` |
+| `--executor <opencode\|pi>` | Which worker CLI to spawn. Defaults to `opencode` |
 | `--session-id <id>` | Resume an existing OpenCode session (`--continue --session <id>`) instead of starting fresh; get session ids from a prior `result` or `status --full` |
 | `--key-slot <name>` | Use a configured provider-key slot instead of the daemon's ambient key; see [security.md](security.md) |
 | `--require-final-marker <regex>` | Fail the task if the final message doesn't match this pattern (case-sensitive, standard JS RegExp semantics). Sets `incomplete: true` on the settled task when the final message is empty (after trimming) or doesn't match. Patterns that don't compile as a standard JS RegExp reject the dispatch up front with a usage error. Useful for enforcing a report-format contract like `^Status: (DONE\|DONE_WITH_CONCERNS\|BLOCKED\|NEEDS_CONTEXT)$` on the last line of model output. |
@@ -121,6 +123,7 @@ planning or hard-debugging help mid-task, not for open-ended background work
 | `--model <id>` | Required, no default; the caller picks the advisor |
 | `--directory <path>` | Defaults to the current workspace |
 | `--variant <name>` | Optional reasoning-effort override |
+| `--executor <opencode\|pi>` | Which worker CLI to spawn. Defaults to `opencode` |
 | `--session-id <id>` | Resume a prior advisor exchange |
 | `--timeout-ms <number>` | Optional early-return cap in milliseconds, same semantics as `wait` — omit to block until the advisor answers |
 

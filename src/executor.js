@@ -19,6 +19,7 @@ const SUMMARY_ISOLATION_PROMPT =
  * @property {string} errorBucketPrefix
  * @property {string} defaultModel
  * @property {string} defaultSummaryModel
+ * @property {string} binaryName
  * @property {(env: NodeJS.ProcessEnv) => Promise<string>} listModelsFn
  * @property {(ctx: SpawnLaunchContext) => string[]} buildSpawnArgs
  * @property {() => string} buildSummaryPrompt
@@ -115,6 +116,7 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
     errorBucketPrefix: "pi",
     defaultModel: "minimax/MiniMax-M2.7",
     defaultSummaryModel: "minimax/MiniMax-M2.7",
+    binaryName: "pi",
     /** @type {(env: NodeJS.ProcessEnv) => Promise<string>} */
     listModelsFn: async (env) => {
       const { stdout, stderr } = await execFileFn("pi", ["--list-models"], { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS, env });
@@ -161,6 +163,7 @@ export function opencodeExecutor() {
     errorBucketPrefix: "opencode",
     defaultModel: "openai/gpt-5.6-luna",
     defaultSummaryModel: "opencode/mimo-v2.5-free",
+    binaryName: "opencode",
     listModelsFn: async (env) =>
       (await execFileAsync("opencode", ["models"], { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS, env })).stdout,
     /** @param {SpawnLaunchContext} ctx @returns {string[]} */
@@ -193,6 +196,10 @@ export function opencodeExecutor() {
     },
   };
 }
+
+/** The full set of executor names resolveExecutor() accepts. Single source of truth for
+ * every layer (CLI args, RPC protocol) that validates a user-supplied --executor value. */
+export const KNOWN_EXECUTORS = /** @type {readonly string[]} */ (["opencode", "pi"]);
 
 /** @param {string|undefined} name @returns {import("./executor.js").WorkerExecutor} */
 export function resolveExecutor(name) {

@@ -158,6 +158,57 @@ describe("Unix socket daemon", () => {
     assert.equal(fs.existsSync(paths.socketPath), false);
   });
 
+  test("forwards an executor param on task.dispatch to manager.dispatch(params)", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    await peer.request("dispatch", "task.dispatch", { prompt: "hi", directory: paths.root, executor: "pi" });
+
+    assert.deepEqual(fake.calls.at(-1), ["dispatch", { prompt: "hi", directory: paths.root, executor: "pi" }]);
+  });
+
+  test("forwards an executor param on task.advisor to manager.advisor({ executor })", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    await peer.request("advise", "task.advisor", { prompt: "hi", directory: paths.root, model: "m", executor: "pi" });
+
+    const lastAdvisorCall = fake.calls.filter((call) => call[0] === "advisor").at(-1);
+    assert.deepEqual(lastAdvisorCall, ["advisor", { prompt: "hi", directory: paths.root, model: "m", executor: "pi" }]);
+  });
+
+  test("propagates manager.advisor() errors through the RPC layer", async (t) => {
+    const paths = temporaryPaths(t);
+    const fake = fakeManagerFactory();
+    const baseFactory = fake.factory;
+    const factory = (options) => {
+      const manager = baseFactory(options);
+      manager.advisor = () => {
+        throw new Error("error: executor pi failed\nhelp: inspect the pi worker configuration");
+      };
+      return manager;
+    };
+    const daemon = await startDaemon({ ...paths, taskManagerFactory: factory });
+    t.after(() => daemon.close());
+    const peer = await openPeer(paths.socketPath);
+    t.after(() => peer.close());
+
+    const response = await peer.request("advise", "task.advisor", { prompt: "hi", directory: paths.root, model: "m", executor: "pi" });
+
+    assert.equal(response.ok, false);
+    assert.equal(response.error.code, "REQUEST_FAILED");
+    assert.equal(response.error.message, "executor pi failed");
+    assert.equal(response.error.help, "inspect the pi worker configuration");
+  });
+
   test("creates protected runtime/socket paths and serves ordinary requests", async (t) => {
     const paths = temporaryPaths(t);
     const fake = fakeManagerFactory();

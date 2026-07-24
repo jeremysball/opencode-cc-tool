@@ -211,6 +211,7 @@ async function invoke(manager, request) {
         ...(params.variant !== undefined ? { variant: params.variant } : {}),
         ...(params.sessionId !== undefined ? { sessionId: params.sessionId } : {}),
         ...(params.timeoutMs !== undefined ? { timeoutMs: params.timeoutMs } : {}),
+        ...(params.executor !== undefined ? { executor: params.executor } : {}),
       });
     case "task.context": {
       const context = filteredTaskDetails(manager, params.directory);
