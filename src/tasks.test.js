@@ -2317,6 +2317,27 @@ describe("executorId on persisted tasks (Task 5: legacy records default to openc
   });
 });
 
+describe("dispatch() executor selection (Task 6: optional executor name resolves and stamps task.executorId)", () => {
+  test("dispatch() with executor: \"pi\" resolves piExecutor and stamps task.executorId", () => {
+    const mgr = makeManager({ spawnFn: () => { throw new Error("not reached in this test"); } });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd(), executor: "pi" });
+    const status = mgr.status(dispatched.id);
+    assert.equal(status.executorId, "pi");
+  });
+
+  test("dispatch() with no executor defaults to opencode", () => {
+    const mgr = makeManager({ spawnFn: () => { throw new Error("not reached in this test"); } });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
+    const status = mgr.status(dispatched.id);
+    assert.equal(status.executorId, "opencode");
+  });
+
+  test("dispatch() with an unknown executor name throws", () => {
+    const mgr = makeManager({ spawnFn: () => { throw new Error("not reached in this test"); } });
+    assert.throws(() => mgr.dispatch({ prompt: "hi", directory: process.cwd(), executor: "bogus" }), /unknown executor: bogus/);
+  });
+});
+
 describe("unknown task id (status/cancel/wait/result share one error path)", () => {
   test("status() throws with an actionable help line", () => {
     const mgr = makeManager();

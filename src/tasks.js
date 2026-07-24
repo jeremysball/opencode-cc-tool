@@ -51,7 +51,7 @@ import { resolveExecutor, opencodeExecutor } from "./executor.js";
  * @property {SummaryOf} [summaryOf]
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
- * @property {"opencode"|"pi"} [executorId]
+ * @property {string} [executorId]
  */
 
 /**
@@ -78,7 +78,7 @@ import { resolveExecutor, opencodeExecutor } from "./executor.js";
  * @property {string|null} [spawnError]
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
- * @property {"opencode"|"pi"} [executorId]
+ * @property {string} [executorId]
  */
 
 /**
@@ -936,10 +936,14 @@ export function createTaskManager({
    * @param {boolean} [params.noSandbox]
    * @param {string[]} [params.allowedDirs] - extra directories bound read-write for this dispatch only, on
    *   top of the manager-level default (see createTaskManager's `allowedDirs` option)
+   * @param {string} [params.executor] - "opencode" | "pi", defaults to the manager's defaultExecutor
+   *   (itself the result of `resolveExecutor(undefined)` at construction). An unknown name throws before
+   *   any validation runs, so a misrouted CLI/RPC call fails fast rather than silently picking the default.
    * @returns {TaskSummary & {next: string}}
    */
-  function dispatch({ prompt, directory, model, variant, sessionId, keySlot, internal = false, finalMarker = null, originSessionId, noSandbox = false, allowedDirs: dispatchAllowedDirs }) {
+  function dispatch({ prompt, directory, model, variant, sessionId, keySlot, internal = false, finalMarker = null, originSessionId, noSandbox = false, allowedDirs: dispatchAllowedDirs, executor: executorName }) {
     ensureStateLoaded();
+    const executor = executorName === undefined ? defaultExecutor : resolveExecutor(executorName);
     if (!prompt || typeof prompt !== "string") {
       throw new Error("error: prompt is required\nhelp: taskferry dispatch requires a non-empty prompt string");
     }
@@ -984,7 +988,7 @@ export function createTaskManager({
       }
     }
     const usingDefaultModel = !model;
-    const resolvedModel = model || priorSessionTask?.model || "openai/gpt-5.6-luna";
+    const resolvedModel = model || priorSessionTask?.model || executor.defaultModel;
 
     // Fail fast instead of letting a generic, opaque crash surface from deep
     // inside the spawned opencode child (issue #63). Only applies when this
@@ -1005,6 +1009,7 @@ export function createTaskManager({
       status: "queued",
       directory: normalizedDirectory,
       model: resolvedModel,
+      executorId: executor.id,
       variant: usingDefaultModel ? "high" : variant || null,
       sessionId: sessionId || null,
       originSessionId: originSessionId || null,
@@ -1027,7 +1032,7 @@ export function createTaskManager({
     };
     tasks.set(id, task);
     persistTask(task.id);
-    pendingLaunches.set(id, { prompt, directory: normalizedDirectory, model: resolvedModel, variant: task.variant, sessionId, keyEnvValue: resolvedKeySlot.keyEnvValue, noSandbox: noSandbox === true, allowedDirs: dispatchAllowedDirs, executor: defaultExecutor });
+    pendingLaunches.set(id, { prompt, directory: normalizedDirectory, model: resolvedModel, variant: task.variant, sessionId, keyEnvValue: resolvedKeySlot.keyEnvValue, noSandbox: noSandbox === true, allowedDirs: dispatchAllowedDirs, executor });
     launchQueue.push(id);
     launchQueuedTasks();
 
@@ -1361,6 +1366,7 @@ export function createTaskManager({
       status: "queued",
       directory: fs.realpathSync(SUMMARY_DIR),
       model: activitySummaryModel,
+      executorId: "opencode", // summaries stay opencode-only in this issue -- see plan Verified Findings #10
       variant: null,
       sessionId: null,
       originSessionId: null,
@@ -2040,8 +2046,9 @@ export function createTaskManager({
    * @param {string} [params.variant]
    * @param {string} [params.sessionId]
    * @param {number} [params.timeoutMs]
+   * @param {string} [params.executor] - optional "opencode" | "pi" forwarded to dispatch().
    */
-  async function advisor({ prompt, directory, model, variant, sessionId, timeoutMs } = {}) {
+  async function advisor({ prompt, directory, model, variant, sessionId, timeoutMs, executor } = {}) {
     ensureStateLoaded();
     if (!model || typeof model !== "string") {
       throw new Error("error: model is required\nhelp: taskferry advisor requires a provider/model string, e.g. \"openai/gpt-5.6-sol\"");
@@ -2050,7 +2057,7 @@ export function createTaskManager({
     /** @type {TaskSummary & {next: string}} */
     let dispatched;
     try {
-      dispatched = dispatch({ prompt: /** @type {string} */ (prompt), directory: /** @type {string} */ (directory), model, variant, sessionId: resolved.sessionId });
+      dispatched = dispatch({ prompt: /** @type {string} */ (prompt), directory: /** @type {string} */ (directory), model, variant, sessionId: resolved.sessionId, executor });
     } catch (err) {
       throw new Error(errMessage(err).replaceAll("taskferry dispatch", "taskferry advisor"), { cause: err });
     }
