@@ -160,19 +160,9 @@ const SUMMARY_INPUT_BYTES = 96 * 1024;
 // #78). Kept a safety margin under the hard 131072-byte cap rather than
 // riding the exact limit.
 const PROMPT_ARGV_SAFE_BYTES = 96 * 1024;
-const DEFAULT_SUMMARY_MODEL = "opencode/hy3-free";
-const SUMMARY_AGENT = "taskferry-summary";
+export const DEFAULT_SUMMARY_MODEL = "opencode/mimo-v2.5-free";
 const SUMMARY_PREFLIGHT_TIMEOUT_MS = 10000;
 const execFileAsync = promisify(execFile);
-
-/**
- * @param {string} stdout
- * @param {string} stderr
- * @returns {boolean}
- */
-export function summaryAgentDeniedBash(stdout, stderr) {
-  return /disabled|denied/i.test(`${stdout}\n${stderr}`);
-}
 
 // Ordered most-specific-first: real provider error text often combines
 // more than one signal (e.g. "Rate limit exceeded, check your quota"), so
@@ -282,17 +272,6 @@ function classifyProviderFailure(lines, errorBucketPrefix) {
   return { failure: null, hasParseableLine };
 }
 
-const SUMMARY_AGENT_CONFIG = JSON.stringify({
-  agent: {
-    [SUMMARY_AGENT]: {
-      description: "Summarize an attached task transcript without using tools.",
-      mode: "primary",
-      permission: { "*": "deny" },
-      steps: 5,
-    },
-  },
-});
-
 /**
  * @param {number} value
  * @param {number} fallback
@@ -378,7 +357,6 @@ const DEFAULT_WATCHDOG_GRACE_MS = 5000;
  * @param {typeof spawn} [options.spawnFn]
  * @param {(pid: number, signal: NodeJS.Signals) => void} [options.killFn]
  * @param {(env?: NodeJS.ProcessEnv) => Promise<string>} [options.listModelsFn]
- * @param {(env: NodeJS.ProcessEnv) => Promise<void>} [options.verifySummaryAgentFn]
  * @param {import("./executor.js").WorkerExecutor} [options.defaultExecutor] - fallback WorkerExecutor used when
  *   a dispatch doesn't request one explicitly. Per-dispatch selection (Task 6) calls `resolveExecutor(params.executor)`
  *   and overrides this; this option exists so tests and embedders can swap in a different default without the
@@ -420,27 +398,6 @@ export function createTaskManager({
   spawnFn = spawn,
   killFn = (pid, signal) => process.kill(pid, signal),
   listModelsFn = async (env) => (await execFileAsync("opencode", ["models"], { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS, env })).stdout,
-  verifySummaryAgentFn = async (env) => {
-    // opencode exits non-zero when it correctly refuses the bash call (the
-    // expected, passing outcome), so execFileAsync's promise rejects on the
-    // happy path too. The proof text ("disabled"/"denied") lands on the
-    // rejected error's stdout/stderr, not in a resolved value — inspect both.
-    let stdout;
-    let stderr;
-    try {
-      ({ stdout = "", stderr = "" } = await execFileAsync(
-        "opencode",
-        ["debug", "agent", SUMMARY_AGENT, "--pure", "--tool", "bash", "--params", JSON.stringify({ command: "true" })],
-        { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS, env }
-      ));
-    } catch (err) {
-      stdout = /** @type {{stdout?: string}} */ (err).stdout || "";
-      stderr = /** @type {{stderr?: string}} */ (err).stderr || "";
-    }
-    if (!summaryAgentDeniedBash(stdout, stderr)) {
-      throw new Error("summary agent allowed bash");
-    }
-  },
   defaultExecutor = resolveExecutor(undefined),
   stateDir = DEFAULT_STATE_DIR,
   config = {},
@@ -569,7 +526,6 @@ export function createTaskManager({
     delete env.OPENCODE_CONFIG;
     delete env.OPENCODE_CONFIG_DIR;
     delete env.OPENCODE_CONFIG_CONTENT;
-    env.OPENCODE_CONFIG_CONTENT = SUMMARY_AGENT_CONFIG;
     if (summaryKeySlot && summaryProviderKeyEnvName) {
       const sourceEnvVar = keySlots.get(summaryKeySlot);
       if (!sourceEnvVar) {
@@ -654,7 +610,6 @@ export function createTaskManager({
   let launchTimer = null;
   let runningCount = 0;
   let modelsCache = { expiresAt: 0, output: "" };
-  let summaryAgentVerifiedUntil = 0;
   let activitySummarySubscriptions = 0;
   /** @type {Map<string, Set<boolean>>} */
   const activitySubscriptions = new Map();
@@ -1062,24 +1017,13 @@ export function createTaskManager({
     }
   }
 
-  /** @param {NodeJS.ProcessEnv} env */
-  async function verifySummaryAgent(env) {
-    if (Date.now() < summaryAgentVerifiedUntil) return;
-    try {
-      await verifySummaryAgentFn(env);
-      summaryAgentVerifiedUntil = Date.now() + 5 * 60 * 1000;
-    } catch (err) {
-      throw new Error(`error: summary agent isolation check failed: ${errMessage(err)}\nhelp: verify that OpenCode denies the summary agent's tools before retrying taskferry summary`, { cause: err });
-    }
-  }
-
   /** Shared upfront readiness check for both the direct `summary --mode
    * activity` path and `watch --summaries`'s subscribe-time gate: throws the
-   * same errors `summaryModelAvailable`/`verifySummaryAgent` throw, so a
-   * caller can fail fast before doing any work. */
+   * same error `summaryModelAvailable` throws, so a caller can fail fast
+   * before doing any work. */
   async function checkSummaryModelReady() {
     const env = summaryEnvironment();
-    await Promise.all([summaryModelAvailable(activitySummaryModel, env), verifySummaryAgent(env)]);
+    await summaryModelAvailable(activitySummaryModel, env);
   }
 
   /**
@@ -1098,15 +1042,14 @@ export function createTaskManager({
    * @returns {Promise<{text: string, sessionId: string|null}>}
    */
   async function summarizeActivity(taskId, maxWords, previousActivity) {
-    // Run the model-availability/isolation check up front, outside the
-    // try/catch below -- that catch exists for the stale-session retry
-    // logic (a spawn or poll failure is legitimately best-effort), but a
-    // genuine "model unavailable" or "isolation check failed" error must
-    // propagate instead of being swallowed into an empty result. This
-    // duplicates the same check `summarizeTask()` performs internally
-    // further down, but both `summaryModelAvailable()` and
-    // `verifySummaryAgent()` are self-memoized for 5 minutes, so the repeat
-    // call is a cache hit, not a second real check.
+    // Run the model-availability check up front, outside the try/catch below
+    // -- that catch exists for the stale-session retry logic (a spawn or poll
+    // failure is legitimately best-effort), but a genuine "model unavailable"
+    // error must propagate instead of being swallowed into an empty result.
+    // This duplicates the same check `summarizeTask()` performs internally
+    // further down, but `summaryModelAvailable()` self-memoizes its model
+    // list for 5 minutes, so the repeat call is a cache hit, not a second
+    // real check.
     await checkSummaryModelReady();
     const continueSessionId = activityCache.getSummarySessionId(taskId);
     try {
@@ -1335,7 +1278,7 @@ export function createTaskManager({
       snapshot.inputBytes = Buffer.byteLength(snapshot.narration);
     }
     const env = summaryEnvironment();
-    await Promise.all([summaryModelAvailable(activitySummaryModel, env), verifySummaryAgent(env)]);
+    await summaryModelAvailable(activitySummaryModel, env);
 
     // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.
     const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
@@ -1442,7 +1385,7 @@ export function createTaskManager({
     const dispatchLaunch = /** @type {DispatchLaunch} */ (launch);
     const args = isSummary
       ? [
-          "run", "--dir", SUMMARY_DIR, "--pure", "--agent", SUMMARY_AGENT, "--format", "json", "-m", summaryLaunch.model,
+          "run", "--dir", SUMMARY_DIR, "--pure", "--format", "json", "-m", summaryLaunch.model,
           "-f", summaryLaunch.snapshotPath,
         ]
       : ["run", "--dir", dispatchLaunch.directory, "--auto", "--format", "json", "-m", dispatchLaunch.model];
