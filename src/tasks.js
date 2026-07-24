@@ -377,6 +377,7 @@ const DEFAULT_WATCHDOG_POLL_MS = positiveInteger(
   2000
 );
 const DEFAULT_WATCHDOG_GRACE_MS = 5000;
+const DEFAULT_CANCEL_GRACE_MS = 5000;
 
 /**
  * @param {object} [options]
@@ -397,6 +398,7 @@ const DEFAULT_WATCHDOG_GRACE_MS = 5000;
  * @param {number} [options.postOutputNoOutputTimeoutMs]
  * @param {number} [options.watchdogPollMs]
  * @param {number} [options.watchdogGraceMs]
+ * @param {number} [options.cancelGraceMs]
  * @param {number} [options.maxWaitMs]
  * @param {string} [options.keySlotsSpec]
  * @param {string|null} [options.providerKeyEnvName]
@@ -424,9 +426,11 @@ export function createTaskManager({
   spawnFn = spawn,
   killFn = (pid, signal) => process.kill(pid, signal),
   listModelsFn = async (env) => (await execFileAsync("opencode", ["models"], { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS, env })).stdout,
-  defaultExecutor = resolveExecutor(undefined),
   stateDir = DEFAULT_STATE_DIR,
   config = {},
+  defaultExecutor = resolveExecutor(
+    process.env.TASKFERRY_DEFAULT_EXECUTOR || /** @type {string|undefined} */ (config.defaultExecutor)
+  ),
   maxDispatchesPerWindow = positiveInteger(
     Number(process.env.TASKFERRY_MAX_DISPATCHES_PER_WINDOW),
     positiveInteger(/** @type {number} */ (config.maxDispatchesPerWindow), DEFAULT_MAX_DISPATCHES_PER_WINDOW)
@@ -455,6 +459,10 @@ export function createTaskManager({
   watchdogGraceMs = positiveInteger(
     Number(process.env.TASKFERRY_WATCHDOG_GRACE_MS),
     positiveInteger(/** @type {number} */ (config.watchdogGraceMs), DEFAULT_WATCHDOG_GRACE_MS)
+  ),
+  cancelGraceMs = positiveInteger(
+    Number(process.env.TASKFERRY_CANCEL_GRACE_MS),
+    positiveInteger(/** @type {number} */ (config.cancelGraceMs), DEFAULT_CANCEL_GRACE_MS)
   ),
   maxWaitMs = MAX_WAIT_MS,
   keySlotsSpec = process.env.TASKFERRY_KEY_SLOTS ?? /** @type {string|undefined} */ (config.keySlots),
@@ -497,6 +505,7 @@ export function createTaskManager({
   const postOutputNoOutputTimeout = positiveInteger(postOutputNoOutputTimeoutMs, DEFAULT_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS);
   const watchdogPoll = positiveInteger(watchdogPollMs, DEFAULT_WATCHDOG_POLL_MS);
   const watchdogGrace = positiveInteger(watchdogGraceMs, DEFAULT_WATCHDOG_GRACE_MS);
+  const cancelGrace = positiveInteger(cancelGraceMs, DEFAULT_CANCEL_GRACE_MS);
   const maxWait = positiveInteger(maxWaitMs, MAX_WAIT_MS);
   const keySlots = parseKeySlots(keySlotsSpec);
   const summarizerTimeout = nonNegativeInteger(summarizerTimeoutMs, DEFAULT_SUMMARIZER_TIMEOUT_MS);
@@ -1744,7 +1753,7 @@ export function createTaskManager({
    * @param {{graceMs?: number}} [options]
    * @returns {TaskSummary & {note: string}}
    */
-  function cancel(taskId, { graceMs = 5000 } = {}) {
+  function cancel(taskId, { graceMs = cancelGrace } = {}) {
     ensureStateLoaded();
     const task = tasks.get(taskId);
     if (!task) throw noSuchTask(taskId);
