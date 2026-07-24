@@ -6,6 +6,7 @@ const execFileAsync = promisify(execFile);
 const SUMMARY_PREFLIGHT_TIMEOUT_MS = 10000;
 const SUMMARY_AGENT = "taskferry-summary";
 
+/** @param {string} stdout @param {string} stderr @returns {boolean} */
 export function summaryAgentDeniedBash(stdout, stderr) {
   return /disabled|denied/i.test(`${stdout}\n${stderr}`);
 }
@@ -138,12 +139,15 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
     summaryAgentName: null,
     summaryAgentConfig: null,
     summaryConfigEnvVar: null,
+    /** @type {(env: NodeJS.ProcessEnv) => Promise<string>} */
     listModelsFn: async (env) => {
       const { stdout, stderr } = await execFileFn("pi", ["--list-models"], { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS, env });
+      /** @param {string} table @returns {string} */
       const normalizeTable = (table) => table.split("\n").map((line) => line.trim()).filter(Boolean).slice(1).map((line) => line.split(/\s+/).slice(0, 2).join("/")).join("\n");
       return normalizeTable(stderr) || normalizeTable(stdout);
     },
     verifySummaryAgentFn: async () => {},
+    /** @param {SpawnLaunchContext} ctx @returns {string[]} */
     buildSpawnArgs(ctx) {
       const slash = ctx.model.indexOf("/");
       const provider = slash === -1 ? null : ctx.model.slice(0, slash);
@@ -160,11 +164,12 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
       return SUMMARY_ISOLATION_PROMPT;
     },
     normalizeLogEvent: piNormalizeLogEvent,
+    /** @param {{homeDir: string, runtimeDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean}} args @returns {{extraRoBind: [string, string]|null, sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
     sandboxAuthFile({ homeDir, runtimeDir, spawnEnv, existsFn }) {
       const realAuthFile = path.join(spawnEnv.PI_CODING_AGENT_DIR || path.join(homeDir, ".pi"), "auth.json");
       const sandboxedDataHome = path.join(runtimeDir, "pi-data");
       return {
-        extraRoBind: existsFn(realAuthFile) ? [realAuthFile, path.join(sandboxedDataHome, "auth.json")] : null,
+        extraRoBind: existsFn(realAuthFile) ? /** @type {[string, string]} */ ([realAuthFile, path.join(sandboxedDataHome, "auth.json")]) : null,
         sandboxedDataHome,
         sandboxEnv: { PI_CODING_AGENT_DIR: sandboxedDataHome },
       };
@@ -202,9 +207,10 @@ export function opencodeExecutor() {
         throw new Error("summary agent allowed bash");
       }
     },
+    /** @param {SpawnLaunchContext} ctx @returns {string[]} */
     buildSpawnArgs(ctx) {
       const args = ctx.isSummary
-        ? ["run", "--dir", path.dirname(ctx.snapshotPath), "--pure", "--agent", SUMMARY_AGENT, "--format", "json", "-m", ctx.model, "-f", ctx.snapshotPath]
+        ? /** @type {string[]} */ (["run", "--dir", path.dirname(/** @type {string} */ (ctx.snapshotPath)), "--pure", "--agent", SUMMARY_AGENT, "--format", "json", "-m", ctx.model, "-f", /** @type {string} */ (ctx.snapshotPath)])
         : ["run", "--dir", ctx.launchDirectory, "--auto", "--format", "json", "-m", ctx.model];
       if (ctx.sessionId) args.push("--continue", "--session", ctx.sessionId);
       if (!ctx.isSummary && ctx.variant) args.push("--variant", ctx.variant);
@@ -218,12 +224,13 @@ export function opencodeExecutor() {
       return SUMMARY_ISOLATION_PROMPT;
     },
     normalizeLogEvent: (parsed) => parsed,
+    /** @param {{homeDir: string, runtimeDir: string, spawnEnv: NodeJS.ProcessEnv, existsFn: (file: string) => boolean}} args @returns {{extraRoBind: [string, string]|null, sandboxedDataHome: string, sandboxEnv: Record<string, string>}} */
     sandboxAuthFile({ homeDir, runtimeDir, spawnEnv, existsFn }) {
       const realDataHome = spawnEnv.XDG_DATA_HOME || path.join(homeDir, ".local", "share");
       const realAuthFile = path.join(realDataHome, "opencode", "auth.json");
       const sandboxedDataHome = path.join(runtimeDir, "opencode-data");
       return {
-        extraRoBind: existsFn(realAuthFile) ? [realAuthFile, path.join(sandboxedDataHome, "opencode", "auth.json")] : null,
+        extraRoBind: existsFn(realAuthFile) ? /** @type {[string, string]} */ ([realAuthFile, path.join(sandboxedDataHome, "opencode", "auth.json")]) : null,
         sandboxedDataHome,
         sandboxEnv: { XDG_DATA_HOME: sandboxedDataHome },
       };
@@ -231,6 +238,7 @@ export function opencodeExecutor() {
   };
 }
 
+/** @param {string|undefined} name @returns {import("./executor.js").WorkerExecutor} */
 export function resolveExecutor(name) {
   if (name === undefined || name === "opencode") return opencodeExecutor();
   if (name === "pi") return piExecutor();

@@ -441,7 +441,7 @@ export function createTaskManager({
       throw new Error("summary agent allowed bash");
     }
   },
-  defaultExecutor = /** @type {import("./executor.js").WorkerExecutor} */ (resolveExecutor(undefined)),
+  defaultExecutor = resolveExecutor(undefined),
   stateDir = DEFAULT_STATE_DIR,
   config = {},
   maxDispatchesPerWindow = positiveInteger(
