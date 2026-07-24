@@ -70,8 +70,9 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
     summaryAgentConfig: null,
     summaryConfigEnvVar: null,
     listModelsFn: async (env) => {
-      const stdout = (await execFileFn("pi", ["--list-models"], { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS, env })).stdout;
-      return stdout.split("\n").slice(1).map((line) => line.trim().split(/\s+/).slice(0, 2).join("/")).filter((line) => line !== "/").join("\n");
+      const { stdout, stderr } = await execFileFn("pi", ["--list-models"], { encoding: "utf8", timeout: SUMMARY_PREFLIGHT_TIMEOUT_MS, env });
+      const normalizeTable = (table) => table.split("\n").map((line) => line.trim()).filter(Boolean).slice(1).map((line) => line.split(/\s+/).slice(0, 2).join("/")).join("\n");
+      return normalizeTable(stderr) || normalizeTable(stdout);
     },
     verifySummaryAgentFn: async () => {},
     buildSpawnArgs(ctx) {

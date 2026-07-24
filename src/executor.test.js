@@ -24,8 +24,9 @@ describe("piExecutor()", () => {
     assert.deepEqual(ex.buildSpawnArgs({ isSummary: true, model: "minimax/MiniMax-M2.7", launchDirectory: "/work", snapshotPath: "/s.json", prompt: "", sessionId: null }), ["--provider", "minimax", "--model", "MiniMax-M2.7", "--mode", "json", "-p", ex.buildSummaryPrompt(), "@/s.json"]);
   });
 
-  test("listModelsFn normalizes pi's padded table output", async () => {
-    const ex = piExecutor({ execFileFn: async () => ({ stdout: "Provider Model\nminimax  MiniMax-M2.7  extra\nopenai  gpt-4o", stderr: "" }) });
+  test("listModelsFn normalizes pi's padded table output from stderr", async () => {
+    const table = "Provider Model\nminimax  MiniMax-M2.7  extra\nopenai  gpt-4o\n\n";
+    const ex = piExecutor({ execFileFn: async () => ({ stdout: "", stderr: table }) });
     assert.equal(await ex.listModelsFn({}), "minimax/MiniMax-M2.7\nopenai/gpt-4o");
   });
 
@@ -36,6 +37,10 @@ describe("piExecutor()", () => {
       sandboxedDataHome: "/state/run/pi-data",
       sandboxEnv: { PI_CODING_AGENT_DIR: "/state/run/pi-data" },
     });
+  });
+
+  test("resolveExecutor resolves pi to a pi executor", () => {
+    assert.equal(resolveExecutor("pi").id, "pi");
   });
 
   test("sandboxAuthFile falls back to ~/.pi", () => {
