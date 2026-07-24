@@ -13,7 +13,7 @@ import { createTaskManager, summaryAgentDeniedBash, isOutsideDirectory } from ".
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, runtimeDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, runtimeDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -31,6 +31,7 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     listModelsFn: listModelsFn ?? (() => "opencode/hy3-free\n"),
     verifySummaryAgentFn: verifySummaryAgentFn ?? (async () => {}),
     sandboxEnabled,
+    ...(defaultExecutor != null ? { defaultExecutor } : {}),
     ...(checkBwrapAvailableFn != null ? { checkBwrapAvailableFn } : {}),
     ...(existsFn != null ? { existsFn } : {}),
     ...(runtimeDir != null ? { runtimeDir } : {}),
@@ -61,6 +62,7 @@ function fakeChild(pid = 4242) {
   const child = new EventEmitter();
   child.pid = pid;
   child.unref = () => {};
+  child.stdout = new EventEmitter();
   return child;
 }
 
@@ -1833,6 +1835,35 @@ describe("provider-failure classification", () => {
     assert.equal(mgr.status(dispatched.id).failureReason, null);
   });
 
+  test("pi's plain-text 'No API key found for openai.' stderr line lands on authentication_failed (issue #94)", async () => {
+    // pi's auth-failure stderr text reads "No API key found for <provider>."
+    // -- plain English, not the `unauthorized`/`invalid api key`/`status 401`
+    // surface the existing regex set covers. Without an additional pattern,
+    // it leaks through as the unclassified `crashed` fallback. Today the
+    // dispatch is opencode-backed (Task 6/7 will let a pi dispatch route
+    // its raw line through the same classifier with `pi_` prefix); the
+    // executor-prefixed end-to-end check lives with that task.
+    const child = fakeChild(7115);
+    const killed = [];
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: (pid, signal) => killed.push({ pid, signal }),
+      noOutputTimeoutMs: 60000,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(
+      mgr.status(dispatched.id).logPath,
+      "No API key found for openai.\n"
+    );
+
+    await new Promise((r) => setTimeout(r, 40));
+    child.emit("exit", null, "SIGTERM");
+    const s = mgr.status(dispatched.id, { full: true });
+    assert.equal(s.failureReason, "authentication_failed");
+    assert.equal(s.failureDetail, "No API key found for openai.");
+  });
+
   test("a structured status_code: 401 diagnostic without the word 'unauthorized' still lands on authentication_failed", async () => {
     const child = fakeChild(7111);
     const killed = [];
@@ -2264,6 +2295,48 @@ describe("cancel()", () => {
   test("a persisted queued task reloads as 'unknown' and is never launched", () => {
     const mgr = makeManager({ tasksFixture: [baseTask({ id: "t1", status: "queued", pid: null })] });
     assert.equal(mgr.status("t1").status, "unknown");
+  });
+});
+
+describe("executorId on persisted tasks (Task 5: legacy records default to opencode at load)", () => {
+  test("a persisted task with no executorId defaults to \"opencode\" on load", () => {
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [{
+        id: "oc_legacy", status: "done", directory: "/tmp", model: "openai/gpt-5.6-luna", variant: "high",
+        sessionId: null, originSessionId: null, pid: null, startedAt: "2026-07-13T10:00:00.000Z",
+        endedAt: "2026-07-13T10:01:00.000Z", exitCode: 0, signal: null, logPath: path.join(logDir, "oc_legacy.ndjson"),
+        promptPreview: "legacy task", promptTotalChars: null, spawnError: null, cancelRequested: false, internal: false,
+      }],
+    });
+    assert.equal(mgr.status("oc_legacy").executorId, "opencode");
+  });
+
+  test("a persisted task that already has executorId \"pi\" is preserved on load", () => {
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "pi_persisted", logPath: path.join(logDir, "pi_persisted.ndjson"), executorId: "pi" })],
+    });
+    assert.equal(mgr.status("pi_persisted").executorId, "pi");
+  });
+});
+
+describe("dispatch() executor selection (Task 6: optional executor name resolves and stamps task.executorId)", () => {
+  test("dispatch() with executor: \"pi\" resolves piExecutor and stamps task.executorId", () => {
+    const mgr = makeManager({ spawnFn: () => { throw new Error("not reached in this test"); } });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd(), executor: "pi" });
+    const status = mgr.status(dispatched.id);
+    assert.equal(status.executorId, "pi");
+  });
+
+  test("dispatch() with no executor defaults to opencode", () => {
+    const mgr = makeManager({ spawnFn: () => { throw new Error("not reached in this test"); } });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
+    const status = mgr.status(dispatched.id);
+    assert.equal(status.executorId, "opencode");
+  });
+
+  test("dispatch() with an unknown executor name throws", () => {
+    const mgr = makeManager({ spawnFn: () => { throw new Error("not reached in this test"); } });
+    assert.throws(() => mgr.dispatch({ prompt: "hi", directory: process.cwd(), executor: "bogus" }), /unknown executor: bogus/);
   });
 });
 

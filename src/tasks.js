@@ -13,6 +13,7 @@ import { formatToolEventForNarration } from "./narration-format.js";
 import { errCode } from "./errors.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 import { buildBwrapArgs, checkBwrapAvailable, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir } from "./sandbox.js";
+import { resolveExecutor, opencodeExecutor } from "./executor.js";
 
 /**
  * @typedef {object} SummaryOf
@@ -50,6 +51,7 @@ import { buildBwrapArgs, checkBwrapAvailable, defaultDenyList, platformSupportsS
  * @property {SummaryOf} [summaryOf]
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
+ * @property {"opencode"|"pi"} [executorId]
  */
 
 /**
@@ -76,6 +78,7 @@ import { buildBwrapArgs, checkBwrapAvailable, defaultDenyList, platformSupportsS
  * @property {string|null} [spawnError]
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
+ * @property {"opencode"|"pi"} [executorId]
  */
 
 /**
@@ -99,6 +102,7 @@ import { buildBwrapArgs, checkBwrapAvailable, defaultDenyList, platformSupportsS
  * @property {string|null} [keyEnvValue]
  * @property {boolean} [noSandbox]
  * @property {string[]} [allowedDirs]
+ * @property {import("./executor.js").WorkerExecutor} executor
  * @property {undefined} [kind]
  * @property {undefined} [snapshotPath]
  */
@@ -111,6 +115,7 @@ import { buildBwrapArgs, checkBwrapAvailable, defaultDenyList, platformSupportsS
  * @property {NodeJS.ProcessEnv} env
  * @property {string|null} [keyEnvValue]
  * @property {string} [summarySessionId]  opencode session id to continue on this turn, if any
+ * @property {import("./executor.js").WorkerExecutor} executor
  */
 
 /** @typedef {DispatchLaunch|SummaryLaunch} LaunchSpec */
@@ -194,6 +199,10 @@ const AUTHENTICATION_FAILED_PATTERNS = [
   /invalid.api.?key/i,
   /authentication.?failed/i,
   /status(_code)?[:\s=]+401\b/i,
+  // pi's own plain-English auth failure text ("No API key found for
+  // <provider>.") matches none of the patterns above -- verified live
+  // against a real unauthenticated pi dispatch (issue #94 research).
+  /no api key/i,
 ];
 // rate_limited: the broadest, most generic bucket, checked last. Bare
 // `quota` (without `insufficient_quota` or another payment_required
@@ -230,9 +239,10 @@ function capDetail(text) {
 // false-positive surface (GLM-5.2 review of 0d944df..4e75129, finding 1).
 /**
  * @param {string[]} lines
+ * @param {string} errorBucketPrefix
  * @returns {{failure: {bucket: string, detail: string} | null, hasParseableLine: boolean}}
  */
-function classifyProviderFailure(lines) {
+function classifyProviderFailure(lines, errorBucketPrefix) {
   let hasParseableLine = false;
   for (const line of lines) {
     if (!line.trim()) continue;
@@ -263,7 +273,7 @@ function classifyProviderFailure(lines) {
     const errorMessage = typeof evt.error?.data?.message === "string" ? evt.error.data.message : text;
     return {
       failure: {
-        bucket: `opencode_${errorName.replace(/[^a-zA-Z0-9]+/g, "_").toLowerCase()}`,
+        bucket: `${errorBucketPrefix}_${errorName.replace(/[^a-zA-Z0-9]+/g, "_").toLowerCase()}`,
         detail: capDetail(errorMessage),
       },
       hasParseableLine,
@@ -369,6 +379,10 @@ const DEFAULT_WATCHDOG_GRACE_MS = 5000;
  * @param {(pid: number, signal: NodeJS.Signals) => void} [options.killFn]
  * @param {(env?: NodeJS.ProcessEnv) => Promise<string>} [options.listModelsFn]
  * @param {(env: NodeJS.ProcessEnv) => Promise<void>} [options.verifySummaryAgentFn]
+ * @param {import("./executor.js").WorkerExecutor} [options.defaultExecutor] - fallback WorkerExecutor used when
+ *   a dispatch doesn't request one explicitly. Per-dispatch selection (Task 6) calls `resolveExecutor(params.executor)`
+ *   and overrides this; this option exists so tests and embedders can swap in a different default without the
+ *   `dispatch({...})` params surface. Defaults to `resolveExecutor(undefined)` → `opencodeExecutor()`.
  * @param {string} [options.stateDir]
  * @param {Record<string, unknown>} [options.config]
  * @param {number} [options.maxDispatchesPerWindow]
@@ -427,6 +441,7 @@ export function createTaskManager({
       throw new Error("summary agent allowed bash");
     }
   },
+  defaultExecutor = resolveExecutor(undefined),
   stateDir = DEFAULT_STATE_DIR,
   config = {},
   maxDispatchesPerWindow = positiveInteger(
@@ -716,6 +731,7 @@ export function createTaskManager({
           // A persisted task may outlive a workspace that has since been removed.
         }
         if (t.status === "running" || t.status === "queued") t.status = "unknown";
+        if (t.executorId === undefined) t.executorId = "opencode";
         tasks.set(t.id, t);
         if (t.status !== previousStatus) taskEvents.emitState(t, previousStatus);
       }
@@ -811,7 +827,7 @@ export function createTaskManager({
    * @returns {TaskSummary}
    */
   function summarize(task) {
-    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, keySlot, incomplete, finalMarker, spawnError } = task;
+    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, keySlot, incomplete, finalMarker, spawnError, executorId } = task;
     return {
       id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath,
       ...failureFields(task),
@@ -822,6 +838,7 @@ export function createTaskManager({
       ...(task.summaryOf ? { summaryOf: task.summaryOf } : {}),
       ...(incomplete === true ? { incomplete: true } : {}),
       ...(finalMarker != null ? { finalMarker } : {}),
+      ...(executorId != null ? { executorId } : {}),
       cancelRequested: !!cancelRequested,
     };
   }
@@ -919,10 +936,14 @@ export function createTaskManager({
    * @param {boolean} [params.noSandbox]
    * @param {string[]} [params.allowedDirs] - extra directories bound read-write for this dispatch only, on
    *   top of the manager-level default (see createTaskManager's `allowedDirs` option)
+   * @param {string} [params.executor] - "opencode" | "pi", defaults to the manager's defaultExecutor
+   *   (itself the result of `resolveExecutor(undefined)` at construction). An unknown name throws before
+   *   any validation runs, so a misrouted CLI/RPC call fails fast rather than silently picking the default.
    * @returns {TaskSummary & {next: string}}
    */
-  function dispatch({ prompt, directory, model, variant, sessionId, keySlot, internal = false, finalMarker = null, originSessionId, noSandbox = false, allowedDirs: dispatchAllowedDirs }) {
+  function dispatch({ prompt, directory, model, variant, sessionId, keySlot, internal = false, finalMarker = null, originSessionId, noSandbox = false, allowedDirs: dispatchAllowedDirs, executor: executorName }) {
     ensureStateLoaded();
+    const executor = executorName === undefined ? defaultExecutor : resolveExecutor(executorName);
     if (!prompt || typeof prompt !== "string") {
       throw new Error("error: prompt is required\nhelp: taskferry dispatch requires a non-empty prompt string");
     }
@@ -951,6 +972,7 @@ export function createTaskManager({
 
     const resolvedKeySlot = resolveKeySlot(keySlot);
 
+    // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.
     const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
     const logPath = path.join(LOG_DIR, `${id}.ndjson`);
 
@@ -966,7 +988,7 @@ export function createTaskManager({
       }
     }
     const usingDefaultModel = !model;
-    const resolvedModel = model || priorSessionTask?.model || "openai/gpt-5.6-luna";
+    const resolvedModel = model || priorSessionTask?.model || executor.defaultModel;
 
     // Fail fast instead of letting a generic, opaque crash surface from deep
     // inside the spawned opencode child (issue #63). Only applies when this
@@ -987,6 +1009,7 @@ export function createTaskManager({
       status: "queued",
       directory: normalizedDirectory,
       model: resolvedModel,
+      executorId: executor.id,
       variant: usingDefaultModel ? "high" : variant || null,
       sessionId: sessionId || null,
       originSessionId: originSessionId || null,
@@ -1009,7 +1032,7 @@ export function createTaskManager({
     };
     tasks.set(id, task);
     persistTask(task.id);
-    pendingLaunches.set(id, { prompt, directory: normalizedDirectory, model: resolvedModel, variant: task.variant, sessionId, keyEnvValue: resolvedKeySlot.keyEnvValue, noSandbox: noSandbox === true, allowedDirs: dispatchAllowedDirs });
+    pendingLaunches.set(id, { prompt, directory: normalizedDirectory, model: resolvedModel, variant: task.variant, sessionId, keyEnvValue: resolvedKeySlot.keyEnvValue, noSandbox: noSandbox === true, allowedDirs: dispatchAllowedDirs, executor });
     launchQueue.push(id);
     launchQueuedTasks();
 
@@ -1314,6 +1337,7 @@ export function createTaskManager({
     const env = summaryEnvironment();
     await Promise.all([summaryModelAvailable(activitySummaryModel, env), verifySummaryAgent(env)]);
 
+    // Task IDs retain the literal "oc_" prefix for compatibility; WorkerExecutor.taskIdPrefix is not wired in this issue.
     const id = `oc_${Date.now().toString(36)}_${randomUUID().slice(0, 8)}`;
     const logPath = path.join(LOG_DIR, `${id}.ndjson`);
     const snapshotPath = path.join(SUMMARY_DIR, `${id}.json`);
@@ -1342,6 +1366,7 @@ export function createTaskManager({
       status: "queued",
       directory: fs.realpathSync(SUMMARY_DIR),
       model: activitySummaryModel,
+      executorId: "opencode", // summaries stay opencode-only in this issue -- see plan Verified Findings #10
       variant: null,
       sessionId: null,
       originSessionId: null,
@@ -1367,6 +1392,7 @@ export function createTaskManager({
       model: activitySummaryModel,
       snapshotPath,
       env,
+      executor: opencodeExecutor(),
       ...(resolvedSummarySessionId ? { summarySessionId: resolvedSummarySessionId } : {}),
     });
     launchQueue.push(id);
@@ -1770,7 +1796,7 @@ export function createTaskManager({
       text += buf.toString("utf8");
     }
     if (!text) return; // nothing to classify
-    const { failure } = classifyProviderFailure(text.split("\n"));
+    const { failure } = classifyProviderFailure(text.split("\n"), "opencode"); // Task 7 makes this task-aware
     if (failure) {
       task.failureReason = failure.bucket;
       task.failureDetail = failure.detail;
@@ -1827,9 +1853,9 @@ export function createTaskManager({
           const text = carry + buf.toString("utf8");
           const lines = text.split("\n");
           carry = lines.pop() ?? "";
-          const linesResult = classifyProviderFailure(lines);
+          const linesResult = classifyProviderFailure(lines, "opencode"); // Task 7 makes this task-aware
           const carryResult = !linesResult.failure && carry && !carry.trimStart().startsWith("{")
-            ? classifyProviderFailure([carry])
+            ? classifyProviderFailure([carry], "opencode") // Task 7 makes this task-aware
             : null;
           const providerFailure = linesResult.failure ?? carryResult?.failure ?? null;
           if (providerFailure) {
@@ -2020,8 +2046,9 @@ export function createTaskManager({
    * @param {string} [params.variant]
    * @param {string} [params.sessionId]
    * @param {number} [params.timeoutMs]
+   * @param {string} [params.executor] - optional "opencode" | "pi" forwarded to dispatch().
    */
-  async function advisor({ prompt, directory, model, variant, sessionId, timeoutMs } = {}) {
+  async function advisor({ prompt, directory, model, variant, sessionId, timeoutMs, executor } = {}) {
     ensureStateLoaded();
     if (!model || typeof model !== "string") {
       throw new Error("error: model is required\nhelp: taskferry advisor requires a provider/model string, e.g. \"openai/gpt-5.6-sol\"");
@@ -2030,7 +2057,7 @@ export function createTaskManager({
     /** @type {TaskSummary & {next: string}} */
     let dispatched;
     try {
-      dispatched = dispatch({ prompt: /** @type {string} */ (prompt), directory: /** @type {string} */ (directory), model, variant, sessionId: resolved.sessionId });
+      dispatched = dispatch({ prompt: /** @type {string} */ (prompt), directory: /** @type {string} */ (directory), model, variant, sessionId: resolved.sessionId, executor });
     } catch (err) {
       throw new Error(errMessage(err).replaceAll("taskferry dispatch", "taskferry advisor"), { cause: err });
     }
