@@ -2296,6 +2296,27 @@ describe("cancel()", () => {
   });
 });
 
+describe("executorId on persisted tasks (Task 5: legacy records default to opencode at load)", () => {
+  test("a persisted task with no executorId defaults to \"opencode\" on load", () => {
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [{
+        id: "oc_legacy", status: "done", directory: "/tmp", model: "openai/gpt-5.6-luna", variant: "high",
+        sessionId: null, originSessionId: null, pid: null, startedAt: "2026-07-13T10:00:00.000Z",
+        endedAt: "2026-07-13T10:01:00.000Z", exitCode: 0, signal: null, logPath: path.join(logDir, "oc_legacy.ndjson"),
+        promptPreview: "legacy task", promptTotalChars: null, spawnError: null, cancelRequested: false, internal: false,
+      }],
+    });
+    assert.equal(mgr.status("oc_legacy").executorId, "opencode");
+  });
+
+  test("a persisted task that already has executorId \"pi\" is preserved on load", () => {
+    const mgr = makeManager({
+      tasksFixture: (logDir) => [baseTask({ id: "pi_persisted", logPath: path.join(logDir, "pi_persisted.ndjson"), executorId: "pi" })],
+    });
+    assert.equal(mgr.status("pi_persisted").executorId, "pi");
+  });
+});
+
 describe("unknown task id (status/cancel/wait/result share one error path)", () => {
   test("status() throws with an actionable help line", () => {
     const mgr = makeManager();

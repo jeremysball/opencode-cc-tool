@@ -13,6 +13,7 @@ import { formatToolEventForNarration } from "./narration-format.js";
 import { errCode } from "./errors.js";
 import { isNonNegativeInteger, isPositiveInteger } from "./numbers.js";
 import { buildBwrapArgs, checkBwrapAvailable, defaultDenyList, platformSupportsSandbox, resolveGitCommonDir } from "./sandbox.js";
+import { resolveExecutor, opencodeExecutor } from "./executor.js";
 
 /**
  * @typedef {object} SummaryOf
@@ -50,6 +51,7 @@ import { buildBwrapArgs, checkBwrapAvailable, defaultDenyList, platformSupportsS
  * @property {SummaryOf} [summaryOf]
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
+ * @property {"opencode"|"pi"} [executorId]
  */
 
 /**
@@ -76,6 +78,7 @@ import { buildBwrapArgs, checkBwrapAvailable, defaultDenyList, platformSupportsS
  * @property {string|null} [spawnError]
  * @property {boolean} [incomplete]
  * @property {string|null} [finalMarker]
+ * @property {"opencode"|"pi"} [executorId]
  */
 
 /**
@@ -99,6 +102,7 @@ import { buildBwrapArgs, checkBwrapAvailable, defaultDenyList, platformSupportsS
  * @property {string|null} [keyEnvValue]
  * @property {boolean} [noSandbox]
  * @property {string[]} [allowedDirs]
+ * @property {import("./executor.js").WorkerExecutor} executor
  * @property {undefined} [kind]
  * @property {undefined} [snapshotPath]
  */
@@ -111,6 +115,7 @@ import { buildBwrapArgs, checkBwrapAvailable, defaultDenyList, platformSupportsS
  * @property {NodeJS.ProcessEnv} env
  * @property {string|null} [keyEnvValue]
  * @property {string} [summarySessionId]  opencode session id to continue on this turn, if any
+ * @property {import("./executor.js").WorkerExecutor} executor
  */
 
 /** @typedef {DispatchLaunch|SummaryLaunch} LaunchSpec */
@@ -374,6 +379,10 @@ const DEFAULT_WATCHDOG_GRACE_MS = 5000;
  * @param {(pid: number, signal: NodeJS.Signals) => void} [options.killFn]
  * @param {(env?: NodeJS.ProcessEnv) => Promise<string>} [options.listModelsFn]
  * @param {(env: NodeJS.ProcessEnv) => Promise<void>} [options.verifySummaryAgentFn]
+ * @param {import("./executor.js").WorkerExecutor} [options.defaultExecutor] - fallback WorkerExecutor used when
+ *   a dispatch doesn't request one explicitly. Per-dispatch selection (Task 6) calls `resolveExecutor(params.executor)`
+ *   and overrides this; this option exists so tests and embedders can swap in a different default without the
+ *   `dispatch({...})` params surface. Defaults to `resolveExecutor(undefined)` → `opencodeExecutor()`.
  * @param {string} [options.stateDir]
  * @param {Record<string, unknown>} [options.config]
  * @param {number} [options.maxDispatchesPerWindow]
@@ -432,6 +441,7 @@ export function createTaskManager({
       throw new Error("summary agent allowed bash");
     }
   },
+  defaultExecutor = /** @type {import("./executor.js").WorkerExecutor} */ (resolveExecutor(undefined)),
   stateDir = DEFAULT_STATE_DIR,
   config = {},
   maxDispatchesPerWindow = positiveInteger(
@@ -721,6 +731,7 @@ export function createTaskManager({
           // A persisted task may outlive a workspace that has since been removed.
         }
         if (t.status === "running" || t.status === "queued") t.status = "unknown";
+        if (t.executorId === undefined) t.executorId = "opencode";
         tasks.set(t.id, t);
         if (t.status !== previousStatus) taskEvents.emitState(t, previousStatus);
       }
@@ -816,7 +827,7 @@ export function createTaskManager({
    * @returns {TaskSummary}
    */
   function summarize(task) {
-    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, keySlot, incomplete, finalMarker, spawnError } = task;
+    const { promptPreview, promptTotalChars, id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath, cancelRequested, keySlot, incomplete, finalMarker, spawnError, executorId } = task;
     return {
       id, status, directory, model, sessionId, originSessionId, pid, startedAt, endedAt, exitCode, signal, logPath,
       ...failureFields(task),
@@ -827,6 +838,7 @@ export function createTaskManager({
       ...(task.summaryOf ? { summaryOf: task.summaryOf } : {}),
       ...(incomplete === true ? { incomplete: true } : {}),
       ...(finalMarker != null ? { finalMarker } : {}),
+      ...(executorId != null ? { executorId } : {}),
       cancelRequested: !!cancelRequested,
     };
   }
@@ -1015,7 +1027,7 @@ export function createTaskManager({
     };
     tasks.set(id, task);
     persistTask(task.id);
-    pendingLaunches.set(id, { prompt, directory: normalizedDirectory, model: resolvedModel, variant: task.variant, sessionId, keyEnvValue: resolvedKeySlot.keyEnvValue, noSandbox: noSandbox === true, allowedDirs: dispatchAllowedDirs });
+    pendingLaunches.set(id, { prompt, directory: normalizedDirectory, model: resolvedModel, variant: task.variant, sessionId, keyEnvValue: resolvedKeySlot.keyEnvValue, noSandbox: noSandbox === true, allowedDirs: dispatchAllowedDirs, executor: defaultExecutor });
     launchQueue.push(id);
     launchQueuedTasks();
 
@@ -1374,6 +1386,7 @@ export function createTaskManager({
       model: activitySummaryModel,
       snapshotPath,
       env,
+      executor: opencodeExecutor(),
       ...(resolvedSummarySessionId ? { summarySessionId: resolvedSummarySessionId } : {}),
     });
     launchQueue.push(id);
