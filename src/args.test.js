@@ -30,6 +30,7 @@ test("parses dispatch and applies its argument defaults", () => {
       finalMarker: undefined,
       noSandbox: false,
       allowedDirs: undefined,
+      executor: undefined,
     },
     help: false,
   });
@@ -213,6 +214,29 @@ test("parses dispatch --require-final-marker and rejects invalid regex sources",
   );
   assert.throws(() => parseArgs(["dispatch", "--prompt", "x", "--require-final-marker"]), /requires a value/);
   assert.throws(() => parseArgs(["wait", "oc_1", "--require-final-marker", "foo"]), /unknown flag --require-final-marker/);
+});
+
+test("dispatch accepts --executor pi", () => {
+  const { options } = parseArgs(["dispatch", "--prompt", "hi", "--executor", "pi"]);
+  assert.equal(options.executor, "pi");
+});
+
+test("dispatch accepts --executor opencode", () => {
+  const { options } = parseArgs(["dispatch", "--prompt", "hi", "--executor", "opencode"]);
+  assert.equal(options.executor, "opencode");
+});
+
+test("dispatch rejects an unknown --executor value", () => {
+  assert.throws(() => parseArgs(["dispatch", "--prompt", "hi", "--executor", "bogus"]), /must be one of opencode, pi/);
+});
+
+test("advisor accepts --executor pi", () => {
+  const { options } = parseArgs(["advisor", "--prompt", "hi", "--model", "m", "--executor", "pi"]);
+  assert.equal(options.executor, "pi");
+});
+
+test("advisor rejects an unknown --executor value", () => {
+  assert.throws(() => parseArgs(["advisor", "--prompt", "hi", "--model", "m", "--executor", "bogus"]), /must be one of opencode, pi/);
 });
 
 test("parses dispatch --no-sandbox", () => {

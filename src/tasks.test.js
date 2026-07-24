@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createTaskManager, isOutsideDirectory, DEFAULT_SUMMARY_MODEL } from "./tasks.js";
+import { createTaskManager, isOutsideDirectory, DEFAULT_SUMMARY_MODEL, bucketFor } from "./tasks.js";
 
 // Builds an isolated task manager backed by a temp state dir and, unless
 // overridden, fake spawnFn/killFn so no test ever touches a real `opencode`
@@ -125,6 +125,14 @@ describe("dispatch() input validation (throws before spawning anything)", () => 
   test("rejects a missing prompt", () => {
     const mgr = makeManager();
     assert.throws(() => mgr.dispatch({ directory: "/tmp" }), /error: prompt is required/);
+  });
+
+  test("rejects an unknown executor name, before prompt/directory validation runs (Task 7 review fix)", () => {
+    const mgr = makeManager();
+    assert.throws(
+      () => mgr.dispatch({ prompt: "hi", directory: "/tmp", executor: "bogus" }),
+      /unknown executor: bogus/
+    );
   });
 
   test("rejects a non-string prompt", () => {
@@ -2599,6 +2607,47 @@ describe("advisor()", () => {
     assert.equal("previous_session_id" in advised, false);
   });
 
+  test("--executor pi reaches an actual pi-spawned child, end to end (Task 7 review fix)", async () => {
+    const child = fakeChild();
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, _opts) => {
+        captured = { cmd, args };
+        return child;
+      },
+    });
+
+    const advisorPromise = mgr.advisor({
+      prompt: "how should I shard this counter?",
+      directory: os.tmpdir(),
+      model: "minimax/MiniMax-M2.7",
+      executor: "pi",
+      timeoutMs: 5000,
+    });
+
+    assert.equal(captured.cmd, "pi");
+    assert.ok(captured.args.includes("--provider"));
+    assert.ok(captured.args.includes("minimax"));
+
+    // Raw pi --mode json events on stdout; startTask's stdout handler must
+    // run them through the real piExecutor().normalizeLogEvent before they
+    // land in the task log, same as a genuine pi child would produce.
+    child.stdout.emit(
+      "data",
+      Buffer.from(
+        [
+          JSON.stringify({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Shard by key, sum on read." }, message: { responseId: "m1" } }),
+          JSON.stringify({ type: "agent_end", messages: [{ role: "assistant", responseId: "m1", usage: { total: 50, cost: { total: 0.002 } } }] }),
+        ].join("\n") + "\n"
+      )
+    );
+    child.emit("exit", 0, null);
+
+    const advised = await advisorPromise;
+    assert.equal(advised.status, "done");
+    assert.equal(advised.message, "Shard by key, sum on read.");
+  });
+
   test("returns status: running with a task_id and session_id when the timeout elapses first", async () => {
     const child = fakeChild();
     const mgr = makeManager({ spawnFn: () => child });
@@ -3582,5 +3631,503 @@ describe("credential preflight for the dispatched model's own provider (issue #6
     });
     mgr.dispatch({ prompt: "hi", directory: os.tmpdir(), model: "openrouter/meta/muse-spark-1.1", keySlot: "primary" });
     assert.equal(captured.env.OPENROUTER_API_KEY, "sk-slotted-secret-value");
+  });
+});
+
+describe("startTask() writes stdout through executor.normalizeLogEvent (Task 7: write-time normalization)", () => {
+  test("JSON events flagged null by normalizeLogEvent are dropped; kept events are written canonicalized", () => {
+    const child = fakeChild();
+    const spawnFn = mock.fn(() => child);
+    const fakeExecutor = {
+      id: "opencode",
+      taskIdPrefix: "oc",
+      errorBucketPrefix: "opencode",
+      defaultModel: "openai/gpt-5.6-luna",
+      defaultSummaryModel: "opencode/mimo-v2.5-free",
+      binaryName: "opencode",
+      listModelsFn: async () => "",
+      buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (evt) => (evt.type === "drop-me" ? null : { ...evt, normalized: true }),
+      sandboxAuthFile: () => ({ extraRoBind: null, sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+    };
+    const mgr = makeManager({ spawnFn, defaultExecutor: fakeExecutor });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
+    const logPath = mgr.status(dispatched.id).logPath;
+    child.stdout.emit("data", Buffer.from('{"type":"drop-me"}\n{"type":"keep-me"}\n'));
+    child.emit("exit", 0, null);
+    const contents = fs.readFileSync(logPath, "utf8");
+    assert.ok(!contents.includes("drop-me"), "events normalizeLogEvent returned null for must not be written to the log");
+    assert.ok(contents.includes('"keep-me"'));
+    assert.ok(contents.includes('"normalized":true'));
+  });
+
+  test("non-JSON stdout lines (e.g. pi's plain-text auth failure) are preserved verbatim for classifyProviderFailure", () => {
+    // Real pi auth-failure output is plain text on stdout (not stderr) and
+    // exits 0 -- the only way classifyProviderFailure can see it is if
+    // it's written to the canonical log file. startTask must therefore
+    // forward every line that isn't parseable JSON verbatim, not drop it.
+    const child = fakeChild();
+    const spawnFn = mock.fn(() => child);
+    const fakeExecutor = {
+      id: "opencode",
+      taskIdPrefix: "oc",
+      errorBucketPrefix: "opencode",
+      defaultModel: "openai/gpt-5.6-luna",
+      defaultSummaryModel: "opencode/mimo-v2.5-free",
+      binaryName: "opencode",
+      listModelsFn: async () => "",
+      buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (parsed) => parsed, // identity, so dropped means JSON.parse failed
+      sandboxAuthFile: () => ({ extraRoBind: null, sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+    };
+    const mgr = makeManager({ spawnFn, defaultExecutor: fakeExecutor });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
+    const logPath = mgr.status(dispatched.id).logPath;
+    child.stdout.emit("data", Buffer.from('No API key found for openai.\n'));
+    child.emit("exit", 0, null);
+    const contents = fs.readFileSync(logPath, "utf8");
+    assert.ok(contents.includes("No API key found for openai."));
+  });
+
+  test("a non-empty trailing partial line at process end is preserved verbatim (no terminating newline required)", () => {
+    const child = fakeChild();
+    const spawnFn = mock.fn(() => child);
+    const fakeExecutor = {
+      id: "opencode",
+      taskIdPrefix: "oc",
+      errorBucketPrefix: "opencode",
+      defaultModel: "openai/gpt-5.6-luna",
+      defaultSummaryModel: "opencode/mimo-v2.5-free",
+      binaryName: "opencode",
+      listModelsFn: async () => "",
+      buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (parsed) => parsed,
+      sandboxAuthFile: () => ({ extraRoBind: null, sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+    };
+    const mgr = makeManager({ spawnFn, defaultExecutor: fakeExecutor });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
+    const logPath = mgr.status(dispatched.id).logPath;
+    child.stdout.emit("data", Buffer.from("trailing non-json fragment with no newline"));
+    child.stdout.emit("end");
+    child.emit("exit", 0, null);
+    const contents = fs.readFileSync(logPath, "utf8");
+    assert.ok(contents.includes("trailing non-json fragment with no newline"));
+  });
+});
+
+describe("startTask() spawns the executor's CLI binary, not a hardcoded command (Task 7: executor-driven binary)", () => {
+  test("a pi dispatch spawns the `pi` binary, with args from executor.buildSpawnArgs", () => {
+    let captured = null;
+    const fakePi = {
+      id: "pi",
+      taskIdPrefix: "pi",
+      errorBucketPrefix: "pi",
+      defaultModel: "minimax/MiniMax-M2.7",
+      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      binaryName: "pi",
+      listModelsFn: async () => "",
+      buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (parsed) => parsed,
+      sandboxAuthFile: () => ({ extraRoBind: null, sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+    };
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      defaultExecutor: fakePi,
+    });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    assert.equal(captured.cmd, "pi");
+    assert.deepEqual(captured.args, ["--model", "minimax/MiniMax-M2.7", "--mode", "json", "-p", "hi"]);
+  });
+
+  test("a default (opencode) dispatch still spawns `opencode`", () => {
+    let captured = null;
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+    });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    assert.equal(captured.cmd, "opencode");
+  });
+});
+
+describe("startTask() merges executor.sandboxAuthFile().sandboxEnv into spawnEnv (Task 7: per-executor env overrides)", () => {
+  test("opencode's sandboxEnv rewrites XDG_DATA_HOME to the sandboxed runtime data home", () => {
+    let captured = null;
+    const runtimeDir = path.join(os.tmpdir(), "axi-tasks-runtime-oc");
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      runtimeDir,
+    });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    assert.equal(captured.opts.env.XDG_DATA_HOME, path.join(runtimeDir, "opencode-data"));
+  });
+
+  test("pi's sandboxEnv rewrites PI_CODING_AGENT_DIR, not XDG_DATA_HOME, and the auth bind destination matches", () => {
+    let captured = null;
+    const runtimeDir = path.join(os.tmpdir(), "axi-tasks-runtime-pi");
+    const realAuthFile = path.join(os.tmpdir(), "fake-pi-home", "auth.json");
+    const fakePi = {
+      id: "pi",
+      taskIdPrefix: "pi",
+      errorBucketPrefix: "pi",
+      defaultModel: "minimax/MiniMax-M2.7",
+      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      binaryName: "pi",
+      listModelsFn: async () => "",
+      buildSpawnArgs: (ctx) => ["--model", ctx.model, "--mode", "json", "-p", ctx.prompt],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (parsed) => parsed,
+      sandboxAuthFile: ({ runtimeDir: rd, existsFn }) => {
+        const sandboxedDataHome = path.join(rd, "pi-data");
+        return {
+          extraRoBind: existsFn(realAuthFile) ? /** @type {[string, string]} */ ([realAuthFile, path.join(sandboxedDataHome, "auth.json")]) : null,
+          sandboxedDataHome,
+          sandboxEnv: { PI_CODING_AGENT_DIR: sandboxedDataHome },
+        };
+      },
+    };
+    const mgr = makeManager({
+      spawnFn: (cmd, args, opts) => { captured = { cmd, args, opts }; return fakeChild(); },
+      defaultExecutor: fakePi,
+      sandboxEnabled: true,
+      checkBwrapAvailableFn: () => ({ checked: true, available: true }),
+      platform: "linux",
+      runtimeDir,
+      existsFn: (p) => p === realAuthFile,
+    });
+    mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    // The pi binary was launched inside bwrap
+    assert.equal(captured.cmd, "bwrap");
+    // The args tail is `-- <binaryName> <buildSpawnArgs...>`. Find the
+    // separator and the binary right after it.
+    const separatorIdx = captured.args.lastIndexOf("--");
+    assert.equal(captured.args[separatorIdx + 1], "pi");
+    // PI_CODING_AGENT_DIR was overridden to the sandboxed data home.
+    assert.equal(captured.opts.env.PI_CODING_AGENT_DIR, path.join(runtimeDir, "pi-data"));
+    // XDG_DATA_HOME was NOT rewritten for pi -- the opencode dispatcher
+    // rewrites it; pi's executor returns a sandboxEnv that only sets
+    // PI_CODING_AGENT_DIR. (Any pre-existing XDG_DATA_HOME from process.env
+    // is preserved verbatim; we don't care whether the host had one.)
+    assert.notEqual(captured.opts.env.XDG_DATA_HOME, path.join(runtimeDir, "pi-data"));
+    // The auth.json bind destination matches the override (pi-data/auth.json)
+    const piDataAuth = path.join(runtimeDir, "pi-data", "auth.json");
+    const destIdx = captured.args.indexOf(piDataAuth);
+    assert.notEqual(destIdx, -1, "expected the auth.json destination to match PI_CODING_AGENT_DIR");
+    // The bwrap pattern is `--ro-bind <src> <dest>`, so --ro-bind sits two
+    // positions before the destination (src is the one position before dest).
+    assert.equal(captured.args[destIdx - 2], "--ro-bind");
+    assert.equal(captured.args[destIdx - 1], realAuthFile);
+  });
+});
+
+describe("provider-failure classification is task-aware via task.executorId (Task 7: end-to-end pi bucket)", () => {
+  test("a pi executor task receiving plain 'No API key found for openai.' settles with failureReason: 'pi_authentication_failed'", async () => {
+    const fakePi = {
+      id: "pi",
+      taskIdPrefix: "pi",
+      errorBucketPrefix: "pi",
+      defaultModel: "minimax/MiniMax-M2.7",
+      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      binaryName: "pi",
+      listModelsFn: async () => "",
+      buildSpawnArgs: () => ["--model", "minimax/MiniMax-M2.7", "--mode", "json", "-p", "hi"],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (parsed) => parsed,
+      sandboxAuthFile: () => ({ extraRoBind: null, sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+    };
+    const child = fakeChild(9119);
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: () => {},
+      defaultExecutor: fakePi,
+      noOutputTimeoutMs: 60000,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    // pi exits 0 after printing the plain-text auth failure on stdout;
+    // startTask's stdout handler must preserve that line so the watcher
+    // can classify it.
+    child.stdout.emit("data", Buffer.from("No API key found for openai.\n"));
+    child.emit("exit", 0, null);
+    // Watcher is async -- give one tick so classifyProviderFailure runs.
+    await new Promise((r) => setTimeout(r, 20));
+    const s = mgr.status(dispatched.id, { full: true });
+    assert.equal(s.failureReason, "pi_authentication_failed");
+    assert.equal(s.failureDetail, "No API key found for openai.");
+  });
+});
+
+describe("bucketFor() (Task 7 review fix: isolate the prefix rule from the classify e2e path)", () => {
+  test("opencode's bucket names stay unprefixed", () => {
+    assert.equal(bucketFor("opencode", "rate_limited"), "rate_limited");
+    assert.equal(bucketFor("opencode", "authentication_failed"), "authentication_failed");
+  });
+
+  test("every other prefix gets an underscore-joined prefix", () => {
+    assert.equal(bucketFor("pi", "rate_limited"), "pi_rate_limited");
+    assert.equal(bucketFor("pi", "executornormalizationerror"), "pi_executornormalizationerror");
+  });
+});
+
+describe("classifyProviderFailure() honors the binding compatibility contract (Task 7)", () => {
+  test("opencode's named buckets stay unprefixed (shipped behavior preserved)", async () => {
+    // Each line below is what opencode would emit today; the bucket must
+    // come back as the historical string every doc, watcher, and CLI
+    // output is keyed off (no `opencode_` prefix).
+    const cases = [
+      { line: JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }), bucket: "rate_limited" },
+      { line: JSON.stringify({ type: "error", message: "insufficient_quota: out of credits" }), bucket: "payment_required" },
+      { line: JSON.stringify({ type: "error", message: "Unauthorized: invalid API key" }), bucket: "authentication_failed" },
+      // Raw non-JSON line that matches a known bucket (e.g. a future pi
+      // shape leaking into an opencode task -- the prefix-stripping rule
+      // must apply on this branch too).
+      { line: "No API key found for openai.", bucket: "authentication_failed" },
+    ];
+    for (const { line, bucket } of cases) {
+      const child = fakeChild(9300 + cases.indexOf({ line, bucket }));
+      const mgr = makeManager({
+        spawnFn: () => child,
+        killFn: () => {},
+        noOutputTimeoutMs: 60000,
+        watchdogPollMs: 5,
+      });
+      const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+      fs.writeFileSync(mgr.status(dispatched.id).logPath, `${line}\n`);
+      await new Promise((r) => setTimeout(r, 40));
+      child.emit("exit", null, "SIGTERM");
+      assert.equal(
+        mgr.status(dispatched.id).failureReason,
+        bucket,
+        `opencode task with line ${JSON.stringify(line)} must land on bare ${bucket}`
+      );
+    }
+  });
+
+  test("pi's named buckets receive the pi_ prefix so executor-specific failures stay distinguishable", async () => {
+    const fakePi = {
+      id: "pi",
+      taskIdPrefix: "pi",
+      errorBucketPrefix: "pi",
+      defaultModel: "minimax/MiniMax-M2.7",
+      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      binaryName: "pi",
+      listModelsFn: async () => "",
+      buildSpawnArgs: () => ["--model", "minimax/MiniMax-M2.7", "--mode", "json", "-p", "hi"],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (parsed) => parsed,
+      sandboxAuthFile: () => ({ extraRoBind: null, sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+    };
+    // Each line is the equivalent pi shape for the opencode buckets above;
+    // the same regex set must classify it, but with the pi_ prefix added.
+    const cases = [
+      { line: JSON.stringify({ type: "error", message: "rate_limit_exceeded: please retry after 60s" }), bucket: "pi_rate_limited" },
+      { line: JSON.stringify({ type: "error", message: "insufficient_quota: out of credits" }), bucket: "pi_payment_required" },
+      { line: JSON.stringify({ type: "error", message: "Unauthorized: invalid API key" }), bucket: "pi_authentication_failed" },
+      { line: "No API key found for openai.", bucket: "pi_authentication_failed" },
+    ];
+    for (let i = 0; i < cases.length; i++) {
+      const { line, bucket } = cases[i];
+      const child = fakeChild(9400 + i);
+      const mgr = makeManager({
+        spawnFn: () => child,
+        killFn: () => {},
+        defaultExecutor: fakePi,
+        noOutputTimeoutMs: 60000,
+        watchdogPollMs: 5,
+      });
+      const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+      fs.writeFileSync(mgr.status(dispatched.id).logPath, `${line}\n`);
+      await new Promise((r) => setTimeout(r, 40));
+      child.emit("exit", null, "SIGTERM");
+      assert.equal(
+        mgr.status(dispatched.id).failureReason,
+        bucket,
+        `pi task with line ${JSON.stringify(line)} must land on ${bucket}`
+      );
+    }
+  });
+
+  test("unknown structured error events keep the executor prefix for both opencode and pi", async () => {
+    // The third-class-name bucket (constructed from evt.error.name) is
+    // a *new* string that has never been shipped unprefixed -- so
+    // callers don't depend on a bare name, and the prefix rule stays
+    // unconditional on this branch.
+    const opencodeEvent = JSON.stringify({
+      type: "error",
+      error: { name: "SomeNewOpencodeClass", data: { message: "Streaming failed" } },
+    });
+    const piEvent = JSON.stringify({
+      type: "error",
+      error: { name: "SomeNewPiClass", data: { message: "Streaming failed" } },
+    });
+    // opencode (default executor)
+    const childOc = fakeChild(9500);
+    const mgrOc = makeManager({
+      spawnFn: () => childOc,
+      killFn: () => {},
+      noOutputTimeoutMs: 60000,
+      watchdogPollMs: 5,
+    });
+    const dispatchedOc = mgrOc.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(mgrOc.status(dispatchedOc.id).logPath, `${opencodeEvent}\n`);
+    await new Promise((r) => setTimeout(r, 40));
+    childOc.emit("exit", null, "SIGTERM");
+    assert.equal(
+      mgrOc.status(dispatchedOc.id).failureReason,
+      "opencode_somenewopencodeclass"
+    );
+
+    // pi
+    const fakePi = {
+      id: "pi",
+      taskIdPrefix: "pi",
+      errorBucketPrefix: "pi",
+      defaultModel: "minimax/MiniMax-M2.7",
+      defaultSummaryModel: "minimax/MiniMax-M2.7",
+      binaryName: "pi",
+      listModelsFn: async () => "",
+      buildSpawnArgs: () => ["--model", "minimax/MiniMax-M2.7", "--mode", "json", "-p", "hi"],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: (parsed) => parsed,
+      sandboxAuthFile: () => ({ extraRoBind: null, sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+    };
+    const childPi = fakeChild(9501);
+    const mgrPi = makeManager({
+      spawnFn: () => childPi,
+      killFn: () => {},
+      defaultExecutor: fakePi,
+      noOutputTimeoutMs: 60000,
+      watchdogPollMs: 5,
+    });
+    const dispatchedPi = mgrPi.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    fs.writeFileSync(mgrPi.status(dispatchedPi.id).logPath, `${piEvent}\n`);
+    await new Promise((r) => setTimeout(r, 40));
+    childPi.emit("exit", null, "SIGTERM");
+    assert.equal(
+      mgrPi.status(dispatchedPi.id).failureReason,
+      "pi_somenewpiclass"
+    );
+  });
+});
+
+describe("startTask() never lets normalizeLogEvent() throws escape the stdout handler (Task 7 review fix)", () => {
+  // The narrow helper used for both the inline and trailing-fragment paths
+  // must catch any throw from executor.normalizeLogEvent(parsed), write a
+  // canonical structured error event to the log file, and return -- the
+  // EventEmitter callback must never propagate the throw up to Node, which
+  // would otherwise unhandle it, crash the daemon, and orphan the child.
+  // The daemon must not silently continue as if the malformed event had
+  // been normalized successfully: a structured error event is observable
+  // through classifyProviderFailure so the task settles with a real
+  // failureReason, not an unclassified "crashed".
+  test("a throwing normalizeLogEvent on the inline path does not crash out of the stdout handler", () => {
+    const child = fakeChild();
+    const spawnFn = mock.fn(() => child);
+    const fakeExecutor = {
+      id: "opencode",
+      taskIdPrefix: "oc",
+      errorBucketPrefix: "opencode",
+      defaultModel: "openai/gpt-5.6-luna",
+      defaultSummaryModel: "opencode/mimo-v2.5-free",
+      binaryName: "opencode",
+      listModelsFn: async () => "",
+      buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: () => { throw new Error("boom from inside normalizeLogEvent"); },
+      sandboxAuthFile: () => ({ extraRoBind: null, sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+    };
+    const mgr = makeManager({ spawnFn, defaultExecutor: fakeExecutor });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
+    const logPath = mgr.status(dispatched.id).logPath;
+    // If the throw escapes the EventEmitter callback, the synchronous emit
+    // surfaces it as an unhandled exception (and crashes the test process).
+    // assert.doesNotThrow proves the callback swallowed the throw.
+    assert.doesNotThrow(() => {
+      child.stdout.emit("data", Buffer.from('{"type":"event"}\n'));
+    });
+    child.emit("exit", 0, null);
+    const contents = fs.readFileSync(logPath, "utf8");
+    // The structured error event reached the log with the executor prefix,
+    // so classifyProviderFailure can see it on the trailing-log path.
+    assert.ok(contents.includes('"name":"ExecutorNormalizationError"'), "structured ExecutorNormalizationError event must be in the log");
+    assert.ok(contents.includes("boom from inside normalizeLogEvent"), "thrown message must be preserved for diagnosis");
+  });
+
+  test("a throwing normalizeLogEvent on the trailing-fragment path is also caught", () => {
+    const child = fakeChild();
+    const spawnFn = mock.fn(() => child);
+    const fakeExecutor = {
+      id: "opencode",
+      taskIdPrefix: "oc",
+      errorBucketPrefix: "opencode",
+      defaultModel: "openai/gpt-5.6-luna",
+      defaultSummaryModel: "opencode/mimo-v2.5-free",
+      binaryName: "opencode",
+      listModelsFn: async () => "",
+      buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: () => { throw new Error("trailing throw"); },
+      sandboxAuthFile: () => ({ extraRoBind: null, sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+    };
+    const mgr = makeManager({ spawnFn, defaultExecutor: fakeExecutor });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: process.cwd() });
+    const logPath = mgr.status(dispatched.id).logPath;
+    // Trailing JSON fragment (no terminating newline) -- exercises the
+    // .on("end", ...) path. The trailing fragment and inline path share
+    // one normalization helper, but the trailing branch is its own
+    // emit call site, so it's covered explicitly.
+    child.stdout.emit("data", Buffer.from('{"type":"trailing-event"}'));
+    assert.doesNotThrow(() => {
+      child.stdout.emit("end");
+    });
+    child.emit("exit", 0, null);
+    const contents = fs.readFileSync(logPath, "utf8");
+    assert.ok(contents.includes('"name":"ExecutorNormalizationError"'), "trailing-fragment path must also write the structured error event");
+    assert.ok(contents.includes("trailing throw"), "thrown message must reach the log from the trailing path");
+  });
+
+  test("a task that emits only a normalizing-throw event settles with an executor-prefixed structured failure reason", async () => {
+    // End-to-end check: a real executor whose normalizeLogEvent throws on
+    // every event must not leave the task unclassified. The structured
+    // error event written by the handler carries an unknown error class
+    // name (`ExecutorNormalizationError`) which routes through the
+    // structured-error fallthrough in classifyProviderFailure, producing
+    // an executor-prefixed bucket.
+    const child = fakeChild(9610);
+    const fakeExecutor = {
+      id: "opencode",
+      taskIdPrefix: "oc",
+      errorBucketPrefix: "opencode",
+      defaultModel: "openai/gpt-5.6-luna",
+      defaultSummaryModel: "opencode/mimo-v2.5-free",
+      binaryName: "opencode",
+      listModelsFn: async () => "",
+      buildSpawnArgs: () => ["run", "--dir", process.cwd(), "--auto", "--format", "json", "-m", "x", "--", "hi"],
+      buildSummaryPrompt: () => "",
+      normalizeLogEvent: () => { throw new Error("always throws"); },
+      sandboxAuthFile: () => ({ extraRoBind: null, sandboxedDataHome: "/tmp/unused", sandboxEnv: {} }),
+    };
+    const mgr = makeManager({
+      spawnFn: () => child,
+      killFn: () => {},
+      defaultExecutor: fakeExecutor,
+      noOutputTimeoutMs: 60000,
+      watchdogPollMs: 5,
+    });
+    const dispatched = mgr.dispatch({ prompt: "hi", directory: os.tmpdir() });
+    child.stdout.emit("data", Buffer.from('{"type":"event"}\n'));
+    child.emit("exit", 0, null);
+    // The watcher is async -- give classifyProviderFailure a chance to
+    // scan the trailing log and set failureReason before we assert.
+    await new Promise((r) => setTimeout(r, 40));
+    const s = mgr.status(dispatched.id, { full: true });
+    assert.equal(s.failureReason, "opencode_executornormalizationerror");
+    assert.ok(s.failureDetail?.includes("always throws"), "failureDetail must carry the original thrown message for diagnosis");
   });
 });

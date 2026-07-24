@@ -1,5 +1,6 @@
 import path from "node:path";
 import { isNonNegativeInteger, isObject, isPositiveInteger } from "./numbers.js";
+import { KNOWN_EXECUTORS } from "./executor.js";
 
 export const PROTOCOL_VERSION = 1;
 
@@ -80,7 +81,7 @@ function validParams(method, params) {
     case "system.health":
       return hasOnly(params, []);
     case "task.dispatch":
-      return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "keySlot", "finalMarker", "originSessionId", "noSandbox", "allowedDirs"])
+      return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "keySlot", "finalMarker", "originSessionId", "noSandbox", "allowedDirs", "executor"])
         && isNonEmptyString(params.prompt)
         && isAbsolutePath(params.directory)
         && optional(params.model, isNonEmptyString)
@@ -90,7 +91,8 @@ function validParams(method, params) {
         && optional(params.finalMarker, isNonEmptyString)
         && optional(params.originSessionId, isNonEmptyString)
         && optional(params.noSandbox, (value) => typeof value === "boolean")
-        && optional(params.allowedDirs, (value) => Array.isArray(value) && value.length > 0 && value.every((entry) => isNonEmptyString(entry)));
+        && optional(params.allowedDirs, (value) => Array.isArray(value) && value.length > 0 && value.every((entry) => isNonEmptyString(entry)))
+        && optional(params.executor, (value) => typeof value === "string" && KNOWN_EXECUTORS.includes(value));
     case "task.cancel":
       return hasOnly(params, ["taskId", "graceMs"])
         && isNonEmptyString(params.taskId)
@@ -119,13 +121,14 @@ function validParams(method, params) {
         && optional(params.maxWords, (value) => Number.isSafeInteger(value) && /** @type {number} */ (value) >= 75 && /** @type {number} */ (value) <= 300)
         && optional(params.mode, (value) => value === "report" || value === "activity");
     case "task.advisor":
-      return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "timeoutMs"])
+      return hasOnly(params, ["prompt", "directory", "model", "variant", "sessionId", "timeoutMs", "executor"])
         && isNonEmptyString(params.prompt)
         && isAbsolutePath(params.directory)
         && isNonEmptyString(params.model)
         && optional(params.variant, isNonEmptyString)
         && optional(params.sessionId, isNonEmptyString)
-        && optional(params.timeoutMs, nonNegativeInteger);
+        && optional(params.timeoutMs, nonNegativeInteger)
+        && optional(params.executor, (value) => typeof value === "string" && KNOWN_EXECUTORS.includes(value));
     case "task.context":
       return hasOnly(params, ["directory"]) && isAbsolutePath(params.directory);
     case "event.subscribe":

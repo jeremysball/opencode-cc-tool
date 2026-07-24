@@ -114,6 +114,48 @@ describe("private daemon protocol", () => {
     })), /invalid params/i);
   });
 
+  test("task.dispatch accepts an optional executor param", () => {
+    const parsed = parseRequestLine(request("task.dispatch", {
+      prompt: "hi",
+      directory: "/tmp/project",
+      executor: "pi",
+    }));
+    assert.equal(parsed.params.executor, "pi");
+  });
+
+  test("task.dispatch rejects an invalid executor param", () => {
+    assert.throws(
+      () => parseRequestLine(request("task.dispatch", {
+        prompt: "hi",
+        directory: "/tmp/project",
+        executor: "bogus",
+      })),
+      (error) => error instanceof ProtocolError && error.code === "INVALID_PARAMS"
+    );
+  });
+
+  test("task.advisor accepts an optional executor param", () => {
+    const parsed = parseRequestLine(request("task.advisor", {
+      prompt: "hi",
+      directory: "/tmp/project",
+      model: "m",
+      executor: "opencode",
+    }));
+    assert.equal(parsed.params.executor, "opencode");
+  });
+
+  test("task.advisor rejects an invalid executor param", () => {
+    assert.throws(
+      () => parseRequestLine(request("task.advisor", {
+        prompt: "hi",
+        directory: "/tmp/project",
+        model: "m",
+        executor: "bogus",
+      })),
+      (error) => error instanceof ProtocolError && error.code === "INVALID_PARAMS"
+    );
+  });
+
   test("event.subscribe accepts an optional originSessionId string", () => {
     const parsed = parseRequestLine(request("event.subscribe", {
       directory: "/tmp/project",

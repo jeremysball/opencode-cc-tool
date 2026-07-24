@@ -11,6 +11,7 @@ function fakeChild(pid = 4242) {
   const child = new EventEmitter();
   child.pid = pid;
   child.unref = () => {};
+  child.stdout = new EventEmitter();
   return child;
 }
 

@@ -498,6 +498,38 @@ test("doctor adds an informational note instead of a bwrap check on non-Linux pl
   assert.match(result.info[0], /only available on Linux/);
 });
 
+test("dispatch forwards executor to the RPC payload when set", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  let captured;
+  const client = {
+    request: async (method, params) => {
+      captured = { method, params };
+      return { id: "oc_1" };
+    },
+  };
+
+  await runCommand("dispatch", { prompt: "hi", directory: root, executor: "pi" }, { client, cwd: root });
+
+  assert.equal(captured.method, "task.dispatch");
+  assert.equal(captured.params.executor, "pi");
+});
+
+test("advisor forwards executor to the RPC payload when set", async () => {
+  const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
+  let captured;
+  const client = {
+    request: async (method, params) => {
+      captured = { method, params };
+      return { status: "done", message: "advice" };
+    },
+  };
+
+  await runCommand("advisor", { prompt: "hi", directory: root, model: "m", executor: "pi" }, { client, cwd: root });
+
+  assert.equal(captured.method, "task.advisor");
+  assert.equal(captured.params.executor, "pi");
+});
+
 test("dispatch forwards noSandbox to the RPC payload when set", async () => {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-commands-test-")));
   let capturedParams;

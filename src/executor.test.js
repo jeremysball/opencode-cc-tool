@@ -55,6 +55,10 @@ describe("piExecutor()", () => {
     assert.equal(resolveExecutor("pi").id, "pi");
   });
 
+  test("binaryName is \"pi\" so startTask can spawn the right CLI", () => {
+    assert.equal(piExecutor().binaryName, "pi");
+  });
+
   test("sandboxAuthFile falls back to ~/.pi", () => {
     const ex = piExecutor();
     const result = ex.sandboxAuthFile({ homeDir: "/home/user", runtimeDir: "/state/run", spawnEnv: {}, existsFn: (p) => p === "/home/user/.pi/auth.json" });
@@ -238,6 +242,10 @@ describe("opencodeExecutor()", () => {
   test("resolveExecutor: undefined and \"opencode\" both resolve to opencodeExecutor", () => {
     assert.equal(resolveExecutor(undefined).id, "opencode");
     assert.equal(resolveExecutor("opencode").id, "opencode");
+  });
+
+  test("binaryName is \"opencode\" so startTask can spawn the right CLI", () => {
+    assert.equal(opencodeExecutor().binaryName, "opencode");
   });
 
   test("resolveExecutor: unknown name throws", () => {

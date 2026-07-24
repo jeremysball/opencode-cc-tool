@@ -44,6 +44,9 @@ and burns wall-clock time versus just doing it.
 - State the exact `provider/model` slug (and variant/key-slot, if set) being
   dispatched in your response to the user, not just in the shell command — the
   user shouldn't have to read the command to know what's running.
+- Both `dispatch` and `advisor` also accept `--executor <opencode|pi>` to pick
+  which worker CLI is spawned. Omit it to use the default (`opencode`); pass
+  `--executor pi` only when the task specifically needs the `pi` CLI.
 - Start fresh sessions for each separate implementation task and each reviewer.
 - Resume only the implementer session for a fix to that same task.
 - Keep the task brief and directory explicit so the worker operates in the intended
