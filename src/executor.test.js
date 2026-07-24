@@ -50,6 +50,107 @@ describe("piExecutor()", () => {
   });
 });
 
+describe("piExecutor().normalizeLogEvent", () => {
+  const ex = piExecutor();
+
+  test("session event maps to {sessionID}", () => {
+    const evt = { type: "session", version: 3, id: "019f90ea-1234-70e0-98dc-6847db316eb4", timestamp: "2026-07-23T21:42:41.761Z", cwd: "/tmp" };
+    assert.deepEqual(ex.normalizeLogEvent(evt), { sessionID: "019f90ea-1234-70e0-98dc-6847db316eb4" });
+  });
+
+  test("text_start produces no event (no delta yet)", () => {
+    const evt = {
+      type: "message_update",
+      assistantMessageEvent: { type: "text_start", contentIndex: 1 },
+      message: { role: "assistant", responseId: "06b1bce4cdb53b25ebd32ffbbf5c6b83" },
+    };
+    assert.equal(ex.normalizeLogEvent(evt), null);
+  });
+
+  test("text_delta maps to a text event keyed by message.responseId", () => {
+    const evt = {
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: "PONG" },
+      message: { role: "assistant", responseId: "06b1bce4cdb53b25ebd32ffbbf5c6b83" },
+    };
+    assert.deepEqual(ex.normalizeLogEvent(evt), { type: "text", part: { type: "text", text: "PONG", messageID: "06b1bce4cdb53b25ebd32ffbbf5c6b83" } });
+  });
+
+  test("thinking_delta and text_end produce no event", () => {
+    assert.equal(ex.normalizeLogEvent({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "..." }, message: {} }), null);
+    assert.equal(ex.normalizeLogEvent({ type: "message_update", assistantMessageEvent: { type: "text_end", content: "PONG" }, message: {} }), null);
+  });
+
+  test("agent_start/turn_start/turn_end produce no event", () => {
+    assert.equal(ex.normalizeLogEvent({ type: "agent_start" }), null);
+    assert.equal(ex.normalizeLogEvent({ type: "turn_start" }), null);
+    assert.equal(ex.normalizeLogEvent({ type: "turn_end", message: {} }), null);
+  });
+
+  test("tool_execution_start and tool_execution_update produce no event", () => {
+    assert.equal(ex.normalizeLogEvent({ type: "tool_execution_start", toolCallId: "c1", toolName: "bash", args: { command: "echo hi" } }), null);
+    assert.equal(ex.normalizeLogEvent({ type: "tool_execution_update", toolCallId: "c1", toolName: "bash", partialResult: { content: [] } }), null);
+  });
+
+  test("tool_execution_end maps to a single tool_use event with lowercase tool name", () => {
+    const evt = {
+      type: "tool_execution_end", toolCallId: "call_function_5p8j2prhbb7c_1", toolName: "bash",
+      args: { command: "echo hello-from-pi-tool-test" },
+      result: { content: [{ type: "text", text: "hello-from-pi-tool-test\n" }] },
+      isError: false,
+    };
+    assert.deepEqual(ex.normalizeLogEvent(evt), {
+      type: "tool_use",
+      part: { type: "tool", tool: "bash", state: { input: { command: "echo hello-from-pi-tool-test" }, output: "hello-from-pi-tool-test\n" } },
+    });
+  });
+
+  test("agent_end scans for the last assistant message and emits step_finish with tokens/cost", () => {
+    const evt = {
+      type: "agent_end",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        {
+          role: "assistant", stopReason: "stop", responseId: "resp-1",
+          content: [{ type: "text", text: "PONG" }],
+          usage: { input: 0, output: 18, cacheRead: 0, cacheWrite: 1507, totalTokens: 1525, cost: { input: 0, output: 0.0000216, cacheRead: 0, cacheWrite: 0.000565125, total: 0.000586725 } },
+        },
+      ],
+    };
+    assert.deepEqual(ex.normalizeLogEvent(evt), {
+      type: "step_finish",
+      part: {
+        type: "step-finish", reason: "stop", messageID: "resp-1",
+        tokens: { input: 0, output: 18, cacheRead: 0, cacheWrite: 1507, totalTokens: 1525, cost: { input: 0, output: 0.0000216, cacheRead: 0, cacheWrite: 0.000565125, total: 0.000586725 } },
+        cost: 0.000586725,
+      },
+    });
+  });
+
+  test("agent_end with a stopReason:\"error\" final message emits a structured error event", () => {
+    const evt = {
+      type: "agent_end",
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }] },
+        { role: "assistant", stopReason: "error", errorMessage: "rate limit exceeded", responseId: "resp-2" },
+      ],
+    };
+    assert.deepEqual(ex.normalizeLogEvent(evt), {
+      type: "error",
+      message: "rate limit exceeded",
+      error: { name: "pi_error", data: { message: "rate limit exceeded" } },
+    });
+  });
+
+  test("agent_end with no assistant message produces no event", () => {
+    assert.equal(ex.normalizeLogEvent({ type: "agent_end", messages: [{ role: "user", content: [] }] }), null);
+  });
+
+  test("unrecognized event types produce no event", () => {
+    assert.equal(ex.normalizeLogEvent({ type: "some_future_pi_event", data: {} }), null);
+  });
+});
+
 describe("opencodeExecutor()", () => {
   test("id/taskIdPrefix/errorBucketPrefix", () => {
     const ex = opencodeExecutor();

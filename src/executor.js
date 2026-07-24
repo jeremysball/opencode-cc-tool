@@ -58,6 +58,75 @@ const SUMMARY_ISOLATION_PROMPT =
  * @property {string|null} [variant]
  */
 
+/**
+ * @param {unknown} parsed
+ * @returns {unknown|null}
+ */
+function piNormalizeLogEvent(parsed) {
+  const evt = /** @type {Record<string, unknown>} */ (parsed);
+  switch (evt.type) {
+    case "session":
+      return typeof evt.id === "string" ? { sessionID: evt.id } : null;
+
+    case "message_update": {
+      const inner = /** @type {Record<string, unknown>} */ (evt.assistantMessageEvent);
+      if (inner?.type !== "text_start" && inner?.type !== "text_delta") return null;
+      const message = /** @type {Record<string, unknown>} */ (evt.message);
+      const messageID = typeof message?.responseId === "string" ? message.responseId : "__unknown_message__";
+      const text = inner.type === "text_delta" && typeof inner.delta === "string" ? inner.delta : "";
+      if (inner.type === "text_start") return null;
+      return { type: "text", part: { type: "text", text, messageID } };
+    }
+
+    case "tool_execution_end": {
+      const toolName = typeof evt.toolName === "string" ? evt.toolName : "unknown";
+      const args = evt.args;
+      const result = /** @type {Record<string, unknown>} */ (evt.result);
+      const outputText = Array.isArray(result?.content)
+        ? result.content.filter((c) => c?.type === "text").map((c) => c.text).join("")
+        : "";
+      return {
+        type: "tool_use",
+        part: {
+          type: "tool",
+          tool: toolName,
+          state: { input: args, output: outputText || undefined },
+        },
+      };
+    }
+
+    case "agent_end": {
+      const messages = Array.isArray(evt.messages) ? evt.messages : [];
+      let lastAssistant = null;
+      for (const m of messages) {
+        if (m && m.role === "assistant") lastAssistant = m;
+      }
+      if (!lastAssistant) return null;
+      if (lastAssistant.stopReason === "error") {
+        return {
+          type: "error",
+          message: typeof lastAssistant.errorMessage === "string" ? lastAssistant.errorMessage : "pi agent error",
+          error: { name: "pi_error", data: { message: typeof lastAssistant.errorMessage === "string" ? lastAssistant.errorMessage : "pi agent error" } },
+        };
+      }
+      const messageID = typeof lastAssistant.responseId === "string" ? lastAssistant.responseId : "__unknown_message__";
+      return {
+        type: "step_finish",
+        part: {
+          type: "step-finish",
+          reason: "stop",
+          messageID,
+          tokens: lastAssistant.usage,
+          cost: lastAssistant.usage?.cost?.total ?? null,
+        },
+      };
+    }
+
+    default:
+      return null;
+  }
+}
+
 /** @param {{execFileFn?: typeof execFileAsync}} [options] */
 export function piExecutor({ execFileFn = execFileAsync } = {}) {
   return {
@@ -90,7 +159,7 @@ export function piExecutor({ execFileFn = execFileAsync } = {}) {
     buildSummaryPrompt() {
       return SUMMARY_ISOLATION_PROMPT;
     },
-    normalizeLogEvent: (parsed) => parsed,
+    normalizeLogEvent: piNormalizeLogEvent,
     sandboxAuthFile({ homeDir, runtimeDir, spawnEnv, existsFn }) {
       const realAuthFile = path.join(spawnEnv.PI_CODING_AGENT_DIR || path.join(homeDir, ".pi"), "auth.json");
       const sandboxedDataHome = path.join(runtimeDir, "pi-data");
