@@ -13,7 +13,7 @@ import { createTaskManager, summaryAgentDeniedBash, isOutsideDirectory } from ".
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, runtimeDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, runtimeDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -31,6 +31,7 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     listModelsFn: listModelsFn ?? (() => "opencode/hy3-free\n"),
     verifySummaryAgentFn: verifySummaryAgentFn ?? (async () => {}),
     sandboxEnabled,
+    ...(defaultExecutor != null ? { defaultExecutor } : {}),
     ...(checkBwrapAvailableFn != null ? { checkBwrapAvailableFn } : {}),
     ...(existsFn != null ? { existsFn } : {}),
     ...(runtimeDir != null ? { runtimeDir } : {}),
@@ -61,6 +62,7 @@ function fakeChild(pid = 4242) {
   const child = new EventEmitter();
   child.pid = pid;
   child.unref = () => {};
+  child.stdout = new EventEmitter();
   return child;
 }
 
