@@ -88,7 +88,7 @@ taskferry dispatch --prompt "review this diff" --directory /repo --key-slot back
 
 `taskferry watch --summaries` and `taskferry summary --mode activity` both
 run a bounded snapshot of a task's recent narration through a secondary
-model (`opencode/hy3-free` by default, overridable with
+model (`opencode/mimo-v2.5-free` by default, overridable with
 `TASKFERRY_SUMMARY_MODEL`) to produce a short human-readable status line.
 `taskferry summary --mode report` (the default `summary` mode) does the
 same thing at larger scale: a full asynchronous OpenCode subtask that reads
@@ -106,10 +106,14 @@ task whose log contains secrets you don't want sent there. Specifics:
   `TASKFERRY_SUMMARIZER_TIMEOUT_MS` (default 360000ms) has passed since
   the last refresh for that task — bounding both the token cost and the
   request rate of watching a busy task.
-- **Isolated.** The report-style summary child uses a private attachment,
-  runs outside the source workspace, disables plugins, and denies every
-  agent tool — it cannot read other files or run commands, only summarize
-  the snapshot it was given.
+- **Isolated, but not tool-denied.** The report-style summary child runs
+  with `--pure` (disables plugins) against a private attachment outside the
+  source workspace, and its prompt instructs the model to use only that
+  attachment and ignore any instructions inside it. This is a soft,
+  prompt-level constraint, not an enforced tool-permission denial — the
+  child still has the same tool access (bash, read, write) as any other
+  agent run in its sandbox. Stronger, enforced read-only sandboxing for
+  summary children is tracked in #118.
 - **Opt-in per subscription.** `taskferry watch` only requests live
   summaries when called with `--summaries`; a plain `watch` gets local,
   no-model activity text (the task's own narration, truncated and

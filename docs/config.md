@@ -23,7 +23,7 @@ message — there is no silent typo tolerance.
 {
   "maxConcurrentTasks": 8,
   "noOutputTimeoutMs": 300000,
-  "summaryModel": "opencode/hy3-free",
+  "summaryModel": "opencode/mimo-v2.5-free",
   "keySlots": "primary:OPENCODE_GO_API_KEY,backup:OPENCODE_GO_API_KEY_2"
 }
 ```
@@ -37,7 +37,7 @@ message — there is no silent typo tolerance.
 | `dispatchWindowMs` | `TASKFERRY_DISPATCH_WINDOW_MS` | number | `5000` |
 | `noOutputTimeoutMs` | `TASKFERRY_NO_OUTPUT_TIMEOUT_MS` | number | `256000` |
 | `postOutputNoOutputTimeoutMs` | `TASKFERRY_POST_OUTPUT_NO_OUTPUT_TIMEOUT_MS` | number | `400000` |
-| `summaryModel` | `TASKFERRY_SUMMARY_MODEL` | string | `"opencode/hy3-free"` |
+| `summaryModel` | `TASKFERRY_SUMMARY_MODEL` | string | `"opencode/mimo-v2.5-free"` |
 | `activitySummariesEnabled` | `TASKFERRY_ACTIVITY_SUMMARIES` | boolean | `true` |
 | `summarizerTimeoutMs` | `TASKFERRY_SUMMARIZER_TIMEOUT_MS` | number | `360000` |
 | `activityMaxWords` | `TASKFERRY_ACTIVITY_MAX_WORDS` | number | `75` |

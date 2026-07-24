@@ -38,8 +38,8 @@ describe("loadConfig()", () => {
 
   test("returns the parsed object for a valid file", () => {
     const dir = tmpConfigDir();
-    const configPath = writeConfig(dir, JSON.stringify({ maxConcurrentTasks: 8, summaryModel: "opencode/hy3-free" }));
-    assert.deepEqual(loadConfig({ configPath }), { maxConcurrentTasks: 8, summaryModel: "opencode/hy3-free" });
+    const configPath = writeConfig(dir, JSON.stringify({ maxConcurrentTasks: 8, summaryModel: "opencode/mimo-v2.5-free" }));
+    assert.deepEqual(loadConfig({ configPath }), { maxConcurrentTasks: 8, summaryModel: "opencode/mimo-v2.5-free" });
   });
 
   test("throws with error:/help: on malformed JSON", () => {

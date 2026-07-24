@@ -115,7 +115,7 @@ describe("formatWatchEvent toon format for activity/state events", () => {
       status: "running",
       occurredAt: "2026-07-18T00:06:12.414Z",
       summaryFailed: true,
-      summaryError: "summary model is unavailable: opencode/hy3-free",
+      summaryError: "summary model is unavailable: opencode/mimo-v2.5-free",
     }, "toon");
 
     assert.match(line, /oc_1/);

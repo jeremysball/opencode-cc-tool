@@ -7,7 +7,7 @@ import path from "node:path";
 import { createActivityCache, buildLocalActivity, snapshotNarration, activityCacheKey, readDeltaNarration } from "./activity.js";
 import { runCli } from "./cli.js";
 import { parseRequestLine } from "./protocol.js";
-import { createTaskManager } from "./tasks.js";
+import { createTaskManager, DEFAULT_SUMMARY_MODEL } from "./tasks.js";
 
 function fakeChild(pid = 4242) {
   const child = new EventEmitter();
@@ -161,15 +161,14 @@ describe("task activity events", () => {
       sandboxEnabled: false,
       spawnFn: (_command, args) => {
         const child = fakeChild(5000 + children.length);
-        children.push({ child, summary: args.includes("--agent") });
+        children.push({ child, summary: args.includes("--pure") });
         return child;
       },
       killFn: () => {},
       activitySummariesEnabled: true,
       summarizerTimeoutMs: 0,
       onEvent: (event) => events.push(event),
-      listModelsFn: () => "opencode/hy3-free\n",
-      verifySummaryAgentFn: async () => {},
+      listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
     });
     manager.setActivitySummarySubscriptions(1);
 

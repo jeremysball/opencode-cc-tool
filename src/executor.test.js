@@ -19,6 +19,18 @@ describe("piExecutor()", () => {
     assert.deepEqual(ex.buildSpawnArgs({ isSummary: false, model: "gpt-4o", launchDirectory: "/work", promptFilePath: "/p", prompt: "huge", sessionId: null }), ["--model", "gpt-4o", "--mode", "json", "-p", "Follow the instructions in the attached prompt file exactly.", "@/p"]);
   });
 
+  test("buildSpawnArgs maps --variant to pi's --thinking flag, dispatch only", () => {
+    const ex = piExecutor();
+    assert.deepEqual(
+      ex.buildSpawnArgs({ isSummary: false, model: "minimax/MiniMax-M2.7", launchDirectory: "/work", promptFilePath: null, prompt: "hi", sessionId: null, variant: "high" }),
+      ["--provider", "minimax", "--model", "MiniMax-M2.7", "--mode", "json", "--thinking", "high", "-p", "hi"]
+    );
+    assert.deepEqual(
+      ex.buildSpawnArgs({ isSummary: true, model: "minimax/MiniMax-M2.7", launchDirectory: "/work", snapshotPath: "/s.json", prompt: "", sessionId: null, variant: "high" }),
+      ["--provider", "minimax", "--model", "MiniMax-M2.7", "--mode", "json", "-p", ex.buildSummaryPrompt(), "@/s.json"]
+    );
+  });
+
   test("buildSpawnArgs uses snapshot attachment for summaries", () => {
     const ex = piExecutor();
     assert.deepEqual(ex.buildSpawnArgs({ isSummary: true, model: "minimax/MiniMax-M2.7", launchDirectory: "/work", snapshotPath: "/s.json", prompt: "", sessionId: null }), ["--provider", "minimax", "--model", "MiniMax-M2.7", "--mode", "json", "-p", ex.buildSummaryPrompt(), "@/s.json"]);
@@ -189,11 +201,11 @@ describe("opencodeExecutor()", () => {
   test("buildSpawnArgs: summary launch", () => {
     const ex = opencodeExecutor();
     const args = ex.buildSpawnArgs({
-      isSummary: true, model: "opencode/hy3-free", launchDirectory: "/state/summaries",
+      isSummary: true, model: "opencode/mimo-v2.5-free", launchDirectory: "/state/summaries",
       snapshotPath: "/state/summaries/oc_1.json", prompt: "", sessionId: null,
     });
     assert.deepEqual(args, [
-      "run", "--dir", "/state/summaries", "--pure", "--agent", "taskferry-summary", "--format", "json", "-m", "opencode/hy3-free",
+      "run", "--dir", "/state/summaries", "--pure", "--format", "json", "-m", "opencode/mimo-v2.5-free",
       "-f", "/state/summaries/oc_1.json", "--", ex.buildSummaryPrompt(),
     ]);
   });

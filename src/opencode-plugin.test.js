@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import taskferryPlugin, { createOpenCodePlugin } from "./opencode-plugin.js";
-import { createTaskManager } from "./tasks.js";
+import { createTaskManager, DEFAULT_SUMMARY_MODEL } from "./tasks.js";
 
 function temporaryDirectory() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "taskferry-opencode-plugin-test-"));
@@ -218,8 +218,7 @@ test("sets TASKFERRY_CHILD for dispatch and summary children", async () => {
     killFn: () => {},
     maxDispatchesPerWindow: 100,
     dispatchWindowMs: 60000,
-    listModelsFn: async () => "opencode/hy3-free\n",
-    verifySummaryAgentFn: async () => {},
+    listModelsFn: async () => `${DEFAULT_SUMMARY_MODEL}\n`,
   });
   const task = manager.dispatch({ prompt: "dispatch", directory: stateDir });
   const sourceChild = children[0];

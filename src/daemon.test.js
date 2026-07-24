@@ -314,7 +314,7 @@ describe("Unix socket daemon", () => {
     const paths = temporaryPaths(t);
     const fake = fakeManagerFactory([], {
       checkSummaryModelReady: async () => {
-        throw new Error("error: summary model is unavailable: opencode/hy3-free\nhelp: set TASKFERRY_SUMMARY_MODEL to an installed model, then retry taskferry_summary");
+        throw new Error("error: summary model is unavailable: opencode/mimo-v2.5-free\nhelp: set TASKFERRY_SUMMARY_MODEL to an installed model, then retry taskferry_summary");
       },
     });
     const daemon = await startDaemon({ ...paths, taskManagerFactory: fake.factory });

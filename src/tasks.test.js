@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { createTaskManager, summaryAgentDeniedBash, isOutsideDirectory } from "./tasks.js";
+import { createTaskManager, isOutsideDirectory, DEFAULT_SUMMARY_MODEL } from "./tasks.js";
 
 // Builds an isolated task manager backed by a temp state dir and, unless
 // overridden, fake spawnFn/killFn so no test ever touches a real `opencode`
@@ -13,7 +13,7 @@ import { createTaskManager, summaryAgentDeniedBash, isOutsideDirectory } from ".
 // runs synchronously in the constructor, same as the old module-level code
 // did at import time). `tasksFixture` may be an array or `(logDir) => array`
 // for fixtures whose logPath needs to point inside the real log dir.
-function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, verifySummaryAgentFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, runtimeDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn } = {}) {
+function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModelsFn, defaultExecutor, maxDispatchesPerWindow, dispatchWindowMs, advisorSessionTtlMs, maxConcurrentTasks, noOutputTimeoutMs, postOutputNoOutputTimeoutMs, watchdogPollMs, maxWaitMs, keySlotsSpec, providerKeyEnvName, summaryKeySlot, summaryProviderKeyEnvName, sandboxEnabled = false, checkBwrapAvailableFn, existsFn, runtimeDir, platform, onEvent, allowedDirs, resolveGitCommonDirFn } = {}) {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
   const logDir = path.join(stateDir, "logs");
   fs.mkdirSync(logDir, { recursive: true });
@@ -28,8 +28,7 @@ function makeManager({ tasksFixture = [], logs = {}, spawnFn, killFn, listModels
     stateDir,
     spawnFn: spawnFn ?? (() => { throw new Error("spawnFn was not injected for this test"); }),
     killFn: killFn ?? (() => { throw new Error("killFn was not injected for this test"); }),
-    listModelsFn: listModelsFn ?? (() => "opencode/hy3-free\n"),
-    verifySummaryAgentFn: verifySummaryAgentFn ?? (async () => {}),
+    listModelsFn: listModelsFn ?? (() => `${DEFAULT_SUMMARY_MODEL}\n`),
     sandboxEnabled,
     ...(defaultExecutor != null ? { defaultExecutor } : {}),
     ...(checkBwrapAvailableFn != null ? { checkBwrapAvailableFn } : {}),
@@ -641,16 +640,15 @@ describe("bwrap sandboxing", () => {
       checkBwrapAvailableFn: () => ({ checked: true, available: true }),
       platform: "linux",
       spawnFn: (command, args, options) => { captured = { command, args, options }; return child; },
-      verifySummaryAgentFn: async () => {},
     });
 
     await mgr.summarize("source", { maxWords: 150 });
 
     assert.equal(captured.command, "bwrap");
-    assert.ok(captured.args.includes("--agent"));
     assert.equal(captured.options.cwd, mgr.paths.SUMMARY_DIR);
     const bindIndex = captured.args.indexOf("--bind");
     assert.equal(captured.args[bindIndex + 1], mgr.paths.SUMMARY_DIR);
+    assert.equal(captured.args.includes("--agent"), false);
 
     child.emit("exit", 0, null);
   });
@@ -1111,8 +1109,7 @@ describe("output-completeness check at settlement time (issue #35)", () => {
       sandboxEnabled: false,
       spawnFn: () => child,
       killFn: () => {},
-      listModelsFn: () => "opencode/hy3-free\n",
-      verifySummaryAgentFn: async () => {},
+      listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
     });
     const dispatched = mgr1.dispatch({
       prompt: "hi",
@@ -1132,8 +1129,7 @@ describe("output-completeness check at settlement time (issue #35)", () => {
       sandboxEnabled: false,
       spawnFn: () => { throw new Error("not used"); },
       killFn: () => {},
-      listModelsFn: () => "opencode/hy3-free\n",
-      verifySummaryAgentFn: async () => {},
+      listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
     });
     const reloaded = mgr2.status(dispatched.id);
     assert.equal(reloaded.status, "done");
@@ -2982,24 +2978,9 @@ describe("tail()", () => {
   });
 });
 
-describe("summaryAgentDeniedBash", () => {
-  test("recognizes opencode's real denial message on stderr", () => {
-    assert.equal(summaryAgentDeniedBash("", "Tool bash is disabled for agent taskferry-summary\n"), true);
-  });
-
-  test("recognizes a 'denied' message on stdout", () => {
-    assert.equal(summaryAgentDeniedBash("bash tool denied\n", ""), true);
-  });
-
-  test("is false when neither stream mentions disabled/denied (e.g. bash actually ran)", () => {
-    assert.equal(summaryAgentDeniedBash("ok\n", ""), false);
-  });
-});
-
 describe("summarize()", () => {
-  test("uses an isolated tool-denied agent and private attachment", async () => {
+  test("uses --pure and a private attachment", async () => {
     let captured;
-    let verifiedEnv;
     const child = fakeChild();
     const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "Investigated the issue" } });
     const mgr = makeManager({
@@ -3009,19 +2990,16 @@ describe("summarize()", () => {
         captured = { command, args, options };
         return child;
       },
-      verifySummaryAgentFn: async (env) => { verifiedEnv = env; },
     });
 
     const summary = await mgr.summarize("source", { maxWords: 150 });
     assert.equal(captured.command, "opencode");
     assert.ok(captured.args.includes("--pure"));
-    assert.ok(captured.args.includes("--agent"));
     assert.equal(captured.args.includes("--auto"), false);
+    assert.equal(captured.args.includes("--agent"), false);
     const attachment = captured.args[captured.args.indexOf("-f") + 1];
     assert.equal(fs.statSync(attachment).mode & 0o777, 0o600);
     assert.equal(captured.options.cwd, mgr.paths.SUMMARY_DIR);
-    assert.match(captured.options.env.OPENCODE_CONFIG_CONTENT, /"\*":"deny"/);
-    assert.equal(verifiedEnv.OPENCODE_CONFIG_CONTENT, captured.options.env.OPENCODE_CONFIG_CONTENT);
     assert.equal(summary.summaryTask.status, "running");
 
     child.emit("exit", 0, null);
@@ -3119,28 +3097,9 @@ describe("summarize()", () => {
     assert.equal(mgr.list().tasks.length, 1);
   });
 
-  test("does not launch when the effective summary agent isolation check fails", async () => {
-    const log = JSON.stringify({ type: "text", part: { messageID: "m1", text: "progress" } });
-    let spawned = false;
-    const mgr = makeManager({
-      tasksFixture: (logDir) => [baseTask({ id: "source", logPath: path.join(logDir, "source.ndjson") })],
-      logs: { "source.ndjson": log },
-      spawnFn: () => { spawned = true; return fakeChild(); },
-      verifySummaryAgentFn: async () => { throw new Error("bash is enabled"); },
-    });
-    await assert.rejects(mgr.summarize("source"), /summary agent isolation check failed/);
-    assert.equal(spawned, false);
-    assert.equal(mgr.list().tasks.length, 1);
-  });
-
   test("checkSummaryModelReady rejects when the configured summary model is unavailable", async () => {
     const mgr = makeManager({ listModelsFn: () => "openai/gpt-5.6-luna\n" });
     await assert.rejects(mgr.checkSummaryModelReady(), /summary model is unavailable/);
-  });
-
-  test("checkSummaryModelReady rejects when the summary agent isolation check fails", async () => {
-    const mgr = makeManager({ verifySummaryAgentFn: async () => { throw new Error("bash is enabled"); } });
-    await assert.rejects(mgr.checkSummaryModelReady(), /summary agent isolation check failed/);
   });
 
   test("summary --mode activity rejects when the summary model is unavailable, instead of masking the failure with local narration", async () => {
@@ -3151,53 +3110,6 @@ describe("summarize()", () => {
       listModelsFn: () => "openai/gpt-5.6-luna\n",
     });
     await assert.rejects(mgr.summarize("source", { mode: "activity", maxWords: 150 }), /summary model is unavailable/);
-  });
-
-  // The default listModelsFn/verifySummaryAgentFn (used in production, bypassed
-  // by makeManager's forced overrides elsewhere in this file) both shell out to
-  // execFileAsync("opencode", ...). This test exercises those real defaults
-  // against a fake `opencode` on PATH that mimics the CLI's actual exit
-  // behavior -- exit 1 with a "disabled" stderr message when it denies a tool --
-  // so a regression reintroducing the always-throws bug (execFileAsync rejecting
-  // before the denial text is ever inspected) would fail this test even though
-  // every other summarize() test here injects verifySummaryAgentFn and never
-  // touches the real code path at all.
-  test("factory-default verifySummaryAgentFn recovers a real opencode-style tool denial from a rejected execFileAsync call", async (t) => {
-    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-tasks-test-"));
-    const logDir = path.join(stateDir, "logs");
-    fs.mkdirSync(logDir, { recursive: true });
-    const logPath = path.join(logDir, "source.ndjson");
-    fs.writeFileSync(logPath, JSON.stringify({ type: "text", part: { messageID: "m1", text: "progress" } }));
-    fs.writeFileSync(
-      path.join(stateDir, "tasks.json"),
-      JSON.stringify([baseTask({ id: "source", logPath })], null, 2)
-    );
-
-    const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "axi-fake-opencode-"));
-    fs.writeFileSync(
-      path.join(binDir, "opencode"),
-      ['#!/bin/sh', 'if [ "$1" = "debug" ]; then', '  echo "Tool bash is disabled for agent taskferry-summary" 1>&2', '  exit 1', 'fi', 'echo "opencode/hy3-free"', ''].join("\n")
-    );
-    fs.chmodSync(path.join(binDir, "opencode"), 0o755);
-    const originalPath = process.env.PATH;
-    process.env.PATH = `${binDir}:${originalPath}`;
-    t.after(() => {
-      process.env.PATH = originalPath;
-      fs.rmSync(binDir, { recursive: true, force: true });
-      fs.rmSync(stateDir, { recursive: true, force: true });
-    });
-
-    const child = fakeChild();
-    const mgr = createTaskManager({
-      stateDir,
-      sandboxEnabled: false,
-      spawnFn: () => child,
-      killFn: () => {},
-    });
-
-    const summary = await mgr.summarize("source", { maxWords: 150 });
-    assert.equal(summary.summaryTask.status, "running");
-    child.emit("exit", 0, null);
   });
 
   test("preserves head and tail narration around an oversized log omission marker", async () => {
@@ -3461,7 +3373,7 @@ describe("key slots (summary tasks)", () => {
       spawnFn: (cmd, args, opts) => { capturedEnv = opts.env; return fakeChild(); },
       listModelsFn: (env) => {
         modelsEnv = env;
-        return "opencode/hy3-free\n";
+        return `${DEFAULT_SUMMARY_MODEL}\n`;
       },
       keySlotsSpec: "summary-slot:AXI_TEST_SUMMARY_PRIMARY,backup:AXI_TEST_SUMMARY_BACKUP",
       summaryKeySlot: "summary-slot",
@@ -3501,7 +3413,7 @@ describe("key slots (summary tasks)", () => {
       tasksFixture: (logDir) => [{ ...baseTask({ id: "src1", status: "done", logPath: path.join(logDir, "src1.ndjson") }) }],
       logs: { "src1.ndjson": JSON.stringify({ type: "text", part: { messageID: "m1", text: "did the thing" } }) + "\n" },
       spawnFn: (cmd, args, opts) => { capturedEnv = opts.env; return fakeChild(); },
-      listModelsFn: () => "opencode/hy3-free\n",
+      listModelsFn: () => `${DEFAULT_SUMMARY_MODEL}\n`,
       keySlotsSpec: "primary:DEEPSEEK_API_KEY,backup:AXI_TEST_SUMMARY_BACKUP",
       summaryProviderKeyEnvName: "DEEPSEEK_API_KEY",
     });
